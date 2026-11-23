@@ -2,6 +2,9 @@ package icu.nullptr.polyglot.youtube.settings
 
 internal const val ENTRY_TITLE = "PolyglotYT"
 internal const val ENTRY_KEY = "icu.nullptr.polyglot.settings"
+internal const val KEY_OPENAI_STREAMING = "$ENTRY_KEY.openai_streaming"
+internal const val KEY_PERSISTENT_CACHE = "$ENTRY_KEY.persistent_cache"
+internal const val KEY_CLEAR_TRANSLATION_CACHE = "$ENTRY_KEY.clear_translation_cache"
 
 internal const val PREFERENCE_CLASS_NAME = "androidx.preference.Preference"
 internal const val PREFERENCE_GROUP_CLASS_NAME = "androidx.preference.PreferenceGroup"

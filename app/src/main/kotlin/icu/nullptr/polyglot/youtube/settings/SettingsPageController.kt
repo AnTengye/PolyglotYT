@@ -1,12 +1,18 @@
 package icu.nullptr.polyglot.youtube.settings
 
 import android.app.Activity
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import icu.nullptr.polyglot.R
 import icu.nullptr.polyglot.module
 import icu.nullptr.polyglot.util.hook
 import icu.nullptr.polyglot.util.logD
 import icu.nullptr.polyglot.util.logI
 import icu.nullptr.polyglot.util.logW
 import java.util.WeakHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal class SettingsPageController(
     private val adapter: HostPreferenceAdapter,
@@ -15,6 +21,8 @@ internal class SettingsPageController(
     private val clickHandlers = WeakHashMap<Any, () -> Boolean>()
     private val activePagesByActivity = WeakHashMap<Activity, NativeSettingsPage>()
     private val hookedBackActivityClasses = mutableSetOf<Class<*>>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val clearingCache = AtomicBoolean(false)
 
     fun injectEntry(fragment: Any, resourceId: Int) {
         val rootScreen = adapter.preferenceScreenOrNull(fragment) ?: return
@@ -95,6 +103,35 @@ internal class SettingsPageController(
         clickHandlers[preference] = handler
     }
 
+    fun clearTranslationCache(context: Context) {
+        if (!clearingCache.compareAndSet(false, true)) {
+            return
+        }
+
+        Thread(
+            {
+                val result = runCatching {
+                    module.config.clearTranslationCache()
+                }
+                mainHandler.post {
+                    clearingCache.set(false)
+                    val message = result.fold(
+                        onSuccess = { module.res.getString(R.string.translation_cache_cleared) },
+                        onFailure = { error ->
+                            logW(TAG, "Unable to clear translation cache", error)
+                            module.res.getString(
+                                R.string.translation_cache_clear_failed,
+                                error.message ?: error.javaClass.simpleName,
+                            )
+                        },
+                    )
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                }
+            },
+            CLEAR_CACHE_THREAD_NAME,
+        ).apply { isDaemon = true }.start()
+    }
+
     fun activate(activity: Activity, page: NativeSettingsPage) {
         activePagesByActivity[activity] = page
     }
@@ -171,5 +208,6 @@ internal class SettingsPageController(
 
     private companion object {
         const val TAG = "SettingsPageController"
+        const val CLEAR_CACHE_THREAD_NAME = "PolyglotYT-ClearCache"
     }
 }

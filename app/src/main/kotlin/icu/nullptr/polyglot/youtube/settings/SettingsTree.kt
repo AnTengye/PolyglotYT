@@ -101,6 +101,15 @@ internal object PolyglotSettingsTree {
                     summary = { SettingsOptions.textOrNotSet(module.config.openAiModel) },
                     onSubmitted = { module.config.openAiModel = it.trim() },
                 ),
+                SwitchSettingsNode(
+                    key = KEY_OPENAI_STREAMING,
+                    title = module.res.getString(R.string.openai_streaming),
+                    icon = SettingsIcon.NetworkCheck,
+                    visible = { module.config.provider == ConfigManager.PROVIDER_OPENAI },
+                    checked = { module.config.openAiStreaming },
+                    summary = { module.res.getString(R.string.openai_streaming_summary) },
+                    onChanged = { module.config.openAiStreaming = it },
+                ),
                 SelectionSettingsNode(
                     key = "$ENTRY_KEY.target_language",
                     title = module.res.getString(R.string.target_language),
@@ -118,6 +127,21 @@ internal object PolyglotSettingsTree {
                     selectedValue = { module.config.subtitleMode },
                     selectedLabel = { SettingsOptions.subtitleModeLabel(module.config.subtitleMode) },
                     onSelected = { module.config.subtitleMode = it },
+                ),
+                SwitchSettingsNode(
+                    key = KEY_PERSISTENT_CACHE,
+                    title = module.res.getString(R.string.persistent_cache),
+                    icon = SettingsIcon.Endpoint,
+                    checked = { module.config.persistentCacheEnabled },
+                    summary = { module.res.getString(R.string.persistent_cache_summary) },
+                    onChanged = { module.config.persistentCacheEnabled = it },
+                ),
+                ActionSettingsNode(
+                    key = KEY_CLEAR_TRANSLATION_CACHE,
+                    title = module.res.getString(R.string.clear_translation_cache),
+                    icon = SettingsIcon.Subtitle,
+                    summary = { module.res.getString(R.string.clear_translation_cache_summary) },
+                    action = SettingsAction.ClearTranslationCache,
                 ),
             ),
         )
@@ -181,6 +205,7 @@ internal data class ActionSettingsNode(
 
 internal enum class SettingsAction {
     TestConnectivity,
+    ClearTranslationCache,
 }
 
 internal fun SettingsNode.summary(): CharSequence? =

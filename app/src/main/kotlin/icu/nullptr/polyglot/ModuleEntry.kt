@@ -19,15 +19,26 @@ import icu.nullptr.polyglot.youtube.PlayerControlsHook
 import icu.nullptr.polyglot.youtube.SettingsHook
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 lateinit var module: ModuleEntry
+
+val isModuleInitialized: Boolean
+    get() = ::module.isInitialized
+
+fun moduleOrNull(): ModuleEntry? =
+    if (::module.isInitialized) module else null
 
 private const val TARGET_PACKAGE = "com.google.android.youtube"
 private const val TAG = "ModuleEntry"
 
 class ModuleEntry : XposedModule() {
-    private lateinit var fileManager: FileManager
+    lateinit var fileManager: FileManager
+        private set
+
+    val cacheDir: File
+        get() = fileManager.ensureCacheDir()
 
     lateinit var hostVersionName: String
     lateinit var hostClassLoader: ClassLoader

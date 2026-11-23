@@ -243,6 +243,7 @@ internal class NativeSettingsPage(
     private fun handleSettingsAction(action: SettingsAction) {
         when (action) {
             SettingsAction.TestConnectivity -> testConnectivity()
+            SettingsAction.ClearTranslationCache -> controller.clearTranslationCache(dialogContext())
         }
     }
 

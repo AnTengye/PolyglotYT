@@ -20,6 +20,8 @@ class ConfigManager(context: Context, directory: File) {
 
     var maxRetries: Int by Pref("max_retries", 2)
 
+    var persistentCacheEnabled: Boolean by Pref("persistent_cache_enabled", true)
+
     var microsoftEndpoint: String by Pref(
         "microsoft_endpoint",
         "https://api.cognitive.microsofttranslator.com/translate",
@@ -38,6 +40,8 @@ class ConfigManager(context: Context, directory: File) {
 
     var openAiModel: String by Pref("openai_model", "gpt-4o-mini")
 
+    var openAiStreaming: Boolean by Pref("openai_streaming", true)
+
     var openAiSystemPrompt: String by Pref(
         "openai_system_prompt",
         "You are a professional, authentic machine translation engine.",
@@ -49,6 +53,32 @@ class ConfigManager(context: Context, directory: File) {
             "If translation is unnecessary, return the original text. " +
             "NO explanations. NO notes:\n\n{{origin}}",
     )
+
+    @Volatile
+    var onClearTranslationCache: (() -> Unit)? = null
+
+    @Volatile
+    private var cachedTranslationSignature: String? = null
+
+    private val fallbackCacheDir: File = context.cacheDir.resolve("polyglotyt")
+
+    fun translationConfigSignature(): String =
+        cachedTranslationSignature ?: computeTranslationSignature().also {
+            cachedTranslationSignature = it
+        }
+
+    fun clearTranslationCache() {
+        val callback = onClearTranslationCache
+        if (callback != null) {
+            callback.invoke()
+            return
+        }
+        fallbackCacheDir.listFiles()?.forEach { it.deleteRecursively() }
+        fallbackCacheDir.mkdirs()
+    }
+
+    private fun computeTranslationSignature(): String =
+        "$provider|$targetLanguage|${openAiEndpoint.trim()}|${openAiModel.trim()}"
 
     private inner class Pref<T>(
         private val key: String,
@@ -75,6 +105,7 @@ class ConfigManager(context: Context, directory: File) {
                 is Boolean -> kv.putBoolean(key, value)
                 else -> throw IllegalArgumentException("Unsupported type")
             }
+            cachedTranslationSignature = null
         }
     }
 
