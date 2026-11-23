@@ -6,14 +6,18 @@ plugins {
 
 val localProperties = Properties().apply {
     rootProject.file("local.properties")
-        .inputStream()
-        .use { load(it) }
+        .takeIf { it.isFile }
+        ?.inputStream()
+        ?.use { load(it) }
 }
 
 fun localProperty(name: String): String? =
     localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
 
-val hasSigningConfig = localProperty("androidStoreFile") != null
+val hasSigningConfig = localProperty("androidStoreFile") != null &&
+    localProperty("androidStorePassword") != null &&
+    localProperty("androidKeyAlias") != null &&
+    localProperty("androidKeyPassword") != null
 
 android {
     namespace = "icu.nullptr.polyglot"
