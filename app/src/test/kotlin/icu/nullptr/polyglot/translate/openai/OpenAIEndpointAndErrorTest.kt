@@ -94,5 +94,21 @@ class OpenAIEndpointAndErrorTest {
             wasStreaming = true,
         )
         assertEquals(OpenAIErrorCategory.RATE_LIMIT_OVERLOAD, embeddedRl.category)
+
+        val stopNotSent = OpenAIErrorClassifier.classifyHttpError(
+            statusCode = 400,
+            rawBody = """{"error":{"message":"parameter \"stop\" is unsupported for this model"}}""",
+            wasStreaming = false,
+            sentStop = false,
+        )
+        assertFalse(ParamAdaptation.DROP_STOP in stopNotSent.adaptations)
+
+        val stopSent = OpenAIErrorClassifier.classifyHttpError(
+            statusCode = 400,
+            rawBody = """{"error":{"message":"parameter \"stop\" is unsupported for this model"}}""",
+            wasStreaming = false,
+            sentStop = true,
+        )
+        assertTrue(ParamAdaptation.DROP_STOP in stopSent.adaptations)
     }
 }

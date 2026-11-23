@@ -96,6 +96,9 @@ object TranslationManager {
             clearCache()
             CaptionHook.onTranslationCacheCleared()
         }
+        config.onConfigChanged = { key ->
+            CaptionHook.onConfigChanged(key)
+        }
     }
 
     fun currentRuntimeConfig(): RuntimeConfig = runtimeConfigProvider()
@@ -249,6 +252,9 @@ object TranslationManager {
             cacheClearEpoch.incrementAndGet()
             sharedCache.diskStore = resolveDiskStoreForClear()
             sharedCache.clear()
+            if (!currentRuntimeConfig().persistentCacheEnabled) {
+                sharedCache.diskStore = null
+            }
             EndpointCapabilities.clear()
             deleteHostCacheDbIfDetached()
         }

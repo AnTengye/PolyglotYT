@@ -66,6 +66,8 @@ class CaptionSession(
         if (fragment == null) return null
         ensureConfigUpToDate()
 
+        if ('\n' in fragment || '\r' in fragment) return null
+
         val normalized = normalize(fragment)
         if (normalized.isEmpty()) return null
 
@@ -75,15 +77,15 @@ class CaptionSession(
             return null
         }
 
-        if (('\n' in fragment || '\r' in fragment) && lookupMultiLineTranslation(fragment) != null) {
-            return null
-        }
-
         val snap = currentSnapshot()
         if (snap.cues.isEmpty()) return null
 
-        snap.nearestIndexForText(normalized, lastAnchorIndex)?.let { exactIdx ->
+        // If this text is itself a known standalone cue (even if not yet translated),
+        // never let a longer neighboring cue swallow or overwrite it.
+        val exactIdx = snap.nearestIndexForText(normalized, lastAnchorIndex)
+        if (exactIdx != null) {
             lastAnchorIndex = exactIdx
+            return null
         }
 
         val anchor = lastAnchorIndex
@@ -381,6 +383,13 @@ class CaptionSession(
         return snap.cues.getOrNull(idx)
     }
 
+    fun isKnownStandaloneCue(text: String?): Boolean {
+        if (text == null) return false
+        val normalized = normalize(text)
+        if (normalized.isEmpty()) return false
+        return currentSnapshot().hasExactCue(normalized)
+    }
+
     private fun lookupMultiLineTranslation(rawText: String): CaptionTranslation? {
         val lines = CaptionCue.normalizeLines(rawText)
         if (lines.size < 2) return null
@@ -403,7 +412,7 @@ class CaptionSession(
         normalizedFragment: String,
     ): CaptionTranslation? {
         val cueText = snap.cueTexts[index]
-        if (cueText == normalizedFragment || !cueText.contains(normalizedFragment)) {
+        if (!CaptionCue.containsBoundedFragment(cueText, normalizedFragment)) {
             return null
         }
         val entry = translations[cueText] ?: return null
@@ -603,6 +612,9 @@ class CaptionSession(
         val cueTexts: List<String>,
         private val positionsByNormalizedText: Map<String, IntArray>,
     ) {
+        fun hasExactCue(normalized: String): Boolean =
+            positionsByNormalizedText.containsKey(normalized)
+
         fun nearestIndexForText(normalized: String, currentAnchor: Int): Int? {
             val positions = positionsByNormalizedText[normalized] ?: return null
             if (positions.size == 1 || currentAnchor < 0) {

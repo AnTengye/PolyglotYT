@@ -273,7 +273,7 @@ object OpenAIErrorClassifier {
             adaptations.add(ParamAdaptation.DROP_RESPONSE_FORMAT)
         }
 
-        if (sentStop && "'stop'" in lower || ("\"stop\"" in lower && "unsupported" in lower)) {
+        if (sentStop && ("'stop'" in lower || ("\"stop\"" in lower && "unsupported" in lower))) {
             adaptations.add(ParamAdaptation.DROP_STOP)
         }
 

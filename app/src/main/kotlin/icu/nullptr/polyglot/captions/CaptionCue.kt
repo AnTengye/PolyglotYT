@@ -33,5 +33,46 @@ data class CaptionCue(
                     .map(::normalize)
                     .filter { it.isNotEmpty() }
             }
+
+        /**
+         * Returns `true` when [cueText] strictly contains [fragment] (`cueText.length > fragment.length`)
+         * on valid word, punctuation, or CJK character boundaries (preventing mid-word hits like `"he"` in `"the"`).
+         */
+        fun containsBoundedFragment(cueText: String, fragment: String): Boolean {
+            if (fragment.isEmpty() || cueText.length <= fragment.length) return false
+
+            var start = cueText.indexOf(fragment, 0)
+            while (start >= 0) {
+                val end = start + fragment.length
+                val validLeft = start == 0 ||
+                    isCjkChar(fragment[0]) ||
+                    isCjkChar(cueText[start - 1]) ||
+                    !isWordChar(fragment[0]) ||
+                    !isWordChar(cueText[start - 1])
+                val validRight = end == cueText.length ||
+                    isCjkChar(fragment[fragment.length - 1]) ||
+                    isCjkChar(cueText[end]) ||
+                    !isWordChar(fragment[fragment.length - 1]) ||
+                    !isWordChar(cueText[end])
+                if (validLeft && validRight) {
+                    return true
+                }
+                start = cueText.indexOf(fragment, start + 1)
+            }
+            return false
+        }
+
+        private fun isWordChar(ch: Char): Boolean =
+            (ch.isLetterOrDigit() || ch == '_' || ch == '\'') && !isCjkChar(ch)
+
+        private fun isCjkChar(ch: Char): Boolean =
+            when (Character.UnicodeScript.of(ch.code)) {
+                Character.UnicodeScript.HAN,
+                Character.UnicodeScript.HIRAGANA,
+                Character.UnicodeScript.KATAKANA,
+                Character.UnicodeScript.HANGUL,
+                -> true
+                else -> false
+            }
     }
 }

@@ -2,6 +2,7 @@ package icu.nullptr.polyglot.core
 
 import android.content.Context
 import com.tencent.mmkv.MMKV
+import icu.nullptr.polyglot.translate.cache.CacheKeyBuilder
 import java.io.File
 import kotlin.properties.ReadWriteProperty
 import kotlin.reflect.KProperty
@@ -58,6 +59,9 @@ class ConfigManager(context: Context, directory: File) {
     var onClearTranslationCache: (() -> Unit)? = null
 
     @Volatile
+    var onConfigChanged: ((key: String) -> Unit)? = null
+
+    @Volatile
     private var cachedTranslationSignature: String? = null
 
     private val fallbackCacheDir: File = context.cacheDir.resolve("polyglotyt")
@@ -77,8 +81,19 @@ class ConfigManager(context: Context, directory: File) {
         fallbackCacheDir.mkdirs()
     }
 
-    private fun computeTranslationSignature(): String =
-        "$provider|$targetLanguage|${openAiEndpoint.trim()}|${openAiModel.trim()}"
+    private fun computeTranslationSignature(): String {
+        val credentialsAndPromptDigest = CacheKeyBuilder.sha256Hex(
+            buildString {
+                append(openAiApiKey.trim()).append('\n')
+                append(openAiSystemPrompt.trim()).append('\n')
+                append(openAiUserPrompt.trim()).append('\n')
+                append(microsoftEndpoint.trim()).append('\n')
+                append(microsoftApiKey.trim()).append('\n')
+                append(microsoftRegion.trim())
+            },
+        ).take(16)
+        return "$provider|$targetLanguage|${openAiEndpoint.trim()}|${openAiModel.trim()}|$credentialsAndPromptDigest"
+    }
 
     private inner class Pref<T>(
         private val key: String,
@@ -106,6 +121,7 @@ class ConfigManager(context: Context, directory: File) {
                 else -> throw IllegalArgumentException("Unsupported type")
             }
             cachedTranslationSignature = null
+            onConfigChanged?.invoke(key)
         }
     }
 

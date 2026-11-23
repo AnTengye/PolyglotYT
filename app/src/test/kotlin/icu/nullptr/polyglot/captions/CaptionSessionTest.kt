@@ -151,6 +151,28 @@ class CaptionSessionTest {
     }
 
     @Test
+    fun untranslatedStandaloneShortCue_andMidWordSubstring_neverMatchNeighboringTranslatedCues() {
+        val session = CaptionSession(configSignatureProvider = { "google|zh-Hans||" })
+        val untranslatedShort = CaptionCue(startMs = 1_000L, endMs = 2_000L, text = "Yes")
+        val translatedLong = CaptionCue(startMs = 2_000L, endMs = 4_000L, text = "Yes, I completely agree")
+        val translatedHero = CaptionCue(startMs = 4_000L, endMs = 6_000L, text = "the hero arrives now")
+        session.observeTimelineCues(listOf(untranslatedShort, translatedLong, translatedHero))
+
+        // Only the neighbors are translated so far; "Yes" is still untranslated!
+        session.putFinalTranslation("Yes, I completely agree", "是的，我完全同意")
+        session.putFinalTranslation("the hero arrives now", "英雄现在登场")
+
+        assertTrue(session.isKnownStandaloneCue("Yes"))
+        assertNull("Untranslated standalone cue must NOT be swallowed by neighbor", session.translatedCueContaining("Yes"))
+        assertNull("Mid-word 'he' must NOT match 'the' or 'hero'", session.translatedCueContaining("he"))
+
+        // Genuine word-bounded fragment (not a standalone cue) still matches its parent cue:
+        val validFrag = session.translatedCueContaining("hero arrives now")
+        assertNotNull(validFrag)
+        assertEquals("英雄现在登场", validFrag?.translated)
+    }
+
+    @Test
     fun boundedCapacity_evictsOldestObservedCuesWhenCapExceeded() {
         val session = CaptionSession(
             maxObservedCues = 20,

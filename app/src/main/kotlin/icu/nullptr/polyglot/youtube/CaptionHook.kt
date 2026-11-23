@@ -76,6 +76,10 @@ object CaptionHook : BaseHook {
         coordinator.onTranslationCacheCleared()
     }
 
+    fun onConfigChanged(key: String) {
+        coordinator.onConfigChanged(key)
+    }
+
     private fun installTimelineBuildHook(dexkit: DexKitBridge): Boolean {
         val method = dexkit.findCaptionTimelineBuildMethod()
             ?.toMethod() ?: run {
@@ -393,24 +397,32 @@ object CaptionHook : BaseHook {
         source: String,
     ) {
         mainHandler.post {
-            if (!module.config.enabled || expectedEpoch != session.currentEpoch()) {
+            if (expectedEpoch != session.currentEpoch()) {
                 return@post
             }
 
+            val enabledNow = module.config.enabled
+            val isFullRefresh = updatedOriginals.isEmpty() || !enabledNow
+            val ttlMs = if (isFullRefresh) FULL_REFRESH_RENDERER_TTL_MS else RENDERER_STATE_TTL_MS
             val now = System.currentTimeMillis()
             val snapshot = synchronized(rendererStates) {
                 rendererStates.entries
-                    .filter { (_, state) -> now - state.updatedAtMs <= RENDERER_STATE_TTL_MS }
+                    .filter { (_, state) -> now - state.updatedAtMs <= ttlMs }
                     .map { (renderer, state) -> renderer to state }
             }
             if (snapshot.isEmpty()) return@post
 
-            // Full refresh (e.g. cache cleared or target language changed): re-evaluate or restore original text.
-            if (updatedOriginals.isEmpty()) {
+            // Disabled switch or full refresh (cache cleared / config or subtitleMode changed):
+            // restore original subtitle text or re-apply updated formatting immediately.
+            if (isFullRefresh) {
                 for ((renderer, state) in snapshot) {
-                    val resolved = session.resolveTranslation(state.rawText)
-                    val display = if (resolved != null) {
-                        BilingualFormatter.format(state.rawText, resolved.translated)
+                    val display = if (enabledNow) {
+                        val resolved = session.resolveTranslation(state.rawText)
+                        if (resolved != null) {
+                            BilingualFormatter.format(state.rawText, resolved.translated)
+                        } else {
+                            state.rawText
+                        }
                     } else {
                         state.rawText
                     }
@@ -440,9 +452,11 @@ object CaptionHook : BaseHook {
                 val coveredTargets = snapshot
                     .filter { (renderer, state) ->
                         renderer !in handledRenderers &&
+                            '\n' !in state.rawText &&
+                            '\r' !in state.rawText &&
                             state.normalizedText.isNotEmpty() &&
-                            state.normalizedText != updatedCue &&
-                            updatedCue.contains(state.normalizedText)
+                            !session.isKnownStandaloneCue(state.normalizedText) &&
+                            CaptionCue.containsBoundedFragment(updatedCue, state.normalizedText)
                     }
                     .sortedBy { (_, state) -> state.sequence }
                 if (coveredTargets.isEmpty()) continue
@@ -575,6 +589,7 @@ object CaptionHook : BaseHook {
     private const val EDITABLE_TYPE = "android.text.Editable"
     private const val SPARSE_ARRAY_TYPE = "android.util.SparseArray"
     private const val RENDERER_STATE_TTL_MS = 2_500L
+    private const val FULL_REFRESH_RENDERER_TTL_MS = 60_000L
 
     private data class RendererState(
         val method: Method,

@@ -369,13 +369,156 @@ class CaptionPipelineIntegrationTest {
             assertTrue(TranslationManager.sharedCache.memorySize() >= 1)
             assertEquals("L2 diskStore must not be written when persistentCacheEnabled=false", 0, diskStore.size())
 
-            // 2) Clear cache wipes L1 + L2 + invalidates session translations.
+            // 2) Clear cache wipes L1 + L2 + invalidates session translations, and keeps diskStore detached!
             TranslationManager.clearCache()
+            assertNull(
+                "diskStore must stay detached after clearCache when persistentCacheEnabled=false",
+                TranslationManager.sharedCache.diskStore,
+            )
             // Temporarily disable module so clear doesn't immediately re-fetch before assertion:
             activeConfig = activeConfig.copy(enabled = false)
             coordinator.onTranslationCacheCleared()
             assertEquals(0, TranslationManager.sharedCache.memorySize())
             assertNull(session.translationFor("Memory only cue."))
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Suppress("unused")
+    private class FakeCaptionTrack(
+        val lang: String,
+        val vssId: String,
+        val url: String,
+    )
+
+    @Test
+    fun rapidTrackSwitchWithinCoalesceWindow_resetsPairedTimelineInsteadOfLeakingOldCues() {
+        val observedPrompts = CopyOnWriteArrayList<String>()
+        server.createContext("/v1/chat/completions") { exchange ->
+            val reqJson = exchange.requestBody.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            observedPrompts += reqJson
+            val items = extractInputSubtitleItems(reqJson)
+            val bytes = buildNonStreamResponse(items).toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+
+        activeConfig = activeConfig.copy(openAiStreaming = false)
+        val clock = AtomicLong(1_000L)
+        val session = CaptionSession(configSignatureProvider = { "openai|zh-Hans|pair|m" })
+        val coordinator = CaptionPipelineCoordinator(
+            session = session,
+            runtimeConfigProvider = { activeConfig },
+            clockMs = clock::get,
+        )
+
+        try {
+            // Case A: Normal order (track1 -> timeline1), then 100ms later manual switch to Japanese track!
+            val track1En = FakeCaptionTrack("en", "a.en", "https://www.youtube.com/api/timedtext?v=vid1&kind=asr&lang=en")
+            assertTrue(coordinator.onCaptionTrackObserved(track1En, "v1-track"))
+            clock.addAndGet(50L)
+            val timeline1En = listOf(CaptionCue(startMs = 0L, endMs = 3_000L, text = "English cue from video 1."))
+            coordinator.onTimelineBuilt(timeline1En)
+            awaitCondition(2_000L) { session.translationFor(timeline1En[0].text) != null }
+
+            // 100ms later (< 600ms!), user switches track to Japanese (or swipes to Video 2):
+            // Because track1 + timeline1 were already paired, this MUST full-reset and NEVER re-submit timeline1En as "ja"!
+            clock.addAndGet(100L)
+            val trackJa = FakeCaptionTrack("ja", ".ja", "https://www.youtube.com/api/timedtext?v=vid1&lang=ja")
+            assertTrue("Paired timeline must perform full reset on subsequent track switch", coordinator.onCaptionTrackObserved(trackJa, "switch-ja"))
+            assertTrue("Old English timeline must be cleared immediately", session.currentTimelineCues().isEmpty())
+            Thread.sleep(80L)
+            assertFalse(
+                "Old English cue must never be re-submitted under Japanese source language",
+                observedPrompts.any { it.contains("from ja into") && it.contains("English cue from video 1.") },
+            )
+
+            // Case B: Reverse order (timeline2 arrives BEFORE track2 -> coalesces once, then track3 -> resets!)
+            CaptionLanguageState.reset()
+            val coordinator2 = CaptionPipelineCoordinator(
+                session = CaptionSession(configSignatureProvider = { "openai|zh-Hans|pair2|m" }),
+                runtimeConfigProvider = { activeConfig },
+                clockMs = clock::get,
+            )
+            try {
+                val timeline2 = listOf(CaptionCue(startMs = 0L, endMs = 3_000L, text = "Reverse order timeline cue."))
+                coordinator2.onTimelineBuilt(timeline2)
+                clock.addAndGet(80L)
+                val track2 = FakeCaptionTrack("en", "a.en", "https://www.youtube.com/api/timedtext?v=vid2&kind=asr&lang=en")
+                // First track arriving right after unpaired timeline coalesces without wiping timeline2:
+                assertFalse(coordinator2.onCaptionTrackObserved(track2, "v2-late-track"))
+                assertEquals(1, coordinator2.session.currentTimelineCues().size)
+
+                // Immediate swipe 80ms later to Video 3 (same language 'en') MUST reset because one-shot pairing was consumed!
+                clock.addAndGet(80L)
+                val track3 = FakeCaptionTrack("en", "a.en", "https://www.youtube.com/api/timedtext?v=vid3&kind=asr&lang=en")
+                assertTrue(coordinator2.onCaptionTrackObserved(track3, "v3-swipe"))
+                assertTrue(coordinator2.session.currentTimelineCues().isEmpty())
+            } finally {
+                coordinator2.close()
+            }
+        } finally {
+            coordinator.close()
+        }
+    }
+
+    @Test
+    fun apiKeyFixRecoversFromFatalConfigTerminalState_andDisableSwitchImmediatelyRetiresAndNotifiesUi() {
+        server.createContext("/v1/chat/completions") { exchange ->
+            val auth = exchange.requestHeaders.getFirst("Authorization").orEmpty()
+            if (auth != "Bearer sk-valid-key") {
+                val err = """{"error":{"message":"Incorrect API key","code":"invalid_api_key"}}""".toByteArray()
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(401, err.size.toLong())
+                exchange.responseBody.use { it.write(err) }
+                return@createContext
+            }
+            val reqJson = exchange.requestBody.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val items = extractInputSubtitleItems(reqJson)
+            val bytes = buildNonStreamResponse(items).toByteArray(Charsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+
+        val uiEvents = CopyOnWriteArrayList<String>()
+        // Start with empty API key -> triggers FATAL_CONFIG terminal state on initial timeline load!
+        activeConfig = activeConfig.copy(openAiStreaming = false, openAiApiKey = "")
+        val session = CaptionSession(
+            configSignatureProvider = {
+                "${activeConfig.provider}|${activeConfig.targetLanguage}|${activeConfig.openAiEndpoint}|${activeConfig.openAiModel}|${activeConfig.openAiApiKey}"
+            },
+        )
+        val coordinator = CaptionPipelineCoordinator(
+            session = session,
+            runtimeConfigProvider = { activeConfig },
+            sourceLanguageProvider = { "en" },
+            autoGeneratedProvider = { false },
+            onRefreshUi = { _, _, source -> uiEvents += source },
+        )
+
+        try {
+            val cues = listOf(CaptionCue(startMs = 0L, endMs = 3_000L, text = "Recover after setting API key."))
+            coordinator.onTimelineBuilt(cues)
+            awaitCondition(2_000L) {
+                coordinator.scheduler.slotStatesSnapshot().firstOrNull()?.second?.name == "FAILED"
+            }
+
+            // Now user enters valid API key in settings -> onConfigChanged must clear terminal lock & translate!
+            activeConfig = activeConfig.copy(openAiApiKey = "sk-valid-key")
+            coordinator.onConfigChanged("openai_api_key")
+            awaitCondition(2_500L) {
+                session.translationFor("Recover after setting API key.") == "译:Recover after setting API key."
+            }
+
+            // User clicks quick switch to disable module while paused -> immediately retires & fires UI restore event!
+            val prevSchedEpoch = coordinator.scheduler.currentSessionEpoch()
+            activeConfig = activeConfig.copy(enabled = false)
+            coordinator.onConfigChanged("enabled")
+            assertTrue(coordinator.scheduler.currentSessionEpoch() > prevSchedEpoch)
+            assertTrue("module_disabled" in uiEvents)
         } finally {
             coordinator.close()
         }
