@@ -2,15 +2,15 @@ package icu.nullptr.polyglot.youtube
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.Editable
 import android.util.SparseArray
 import android.view.View
 import icu.nullptr.polyglot.captions.BilingualFormatter
 import icu.nullptr.polyglot.captions.CaptionCue
-import icu.nullptr.polyglot.captions.CaptionLanguageState
 import icu.nullptr.polyglot.captions.CaptionSession
+import icu.nullptr.polyglot.captions.engine.CaptionPipelineCoordinator
 import icu.nullptr.polyglot.module
-import icu.nullptr.polyglot.translate.TranslationManager
 import icu.nullptr.polyglot.util.hook
 import icu.nullptr.polyglot.util.logD
 import icu.nullptr.polyglot.util.logI
@@ -37,6 +37,13 @@ object CaptionHook : BaseHook {
     private val rendererSequence = AtomicLong(0L)
     private val applyingTranslatedText = ThreadLocal.withInitial { false }
 
+    private val coordinator = CaptionPipelineCoordinator(
+        session = session,
+        clockMs = SystemClock::elapsedRealtime,
+        logger = { msg, tr -> logW(name, msg, tr) },
+        onRefreshUi = ::refreshVisibleRenderers,
+    )
+
     override fun install(dexkit: DexKitBridge): Int {
         var installed = 0
 
@@ -61,8 +68,12 @@ object CaptionHook : BaseHook {
     }
 
     fun formatCaption(original: CharSequence?): CharSequence {
-        val translated = session.translationFor(original?.toString())
-        return BilingualFormatter.format(original, translated)
+        val resolved = coordinator.resolveForRender(original)
+        return BilingualFormatter.format(original, resolved?.translated)
+    }
+
+    fun onTranslationCacheCleared() {
+        coordinator.onTranslationCacheCleared()
     }
 
     private fun installTimelineBuildHook(dexkit: DexKitBridge): Boolean {
@@ -74,10 +85,10 @@ object CaptionHook : BaseHook {
 
         hook(method) { chain ->
             val result = chain.proceed()
-            if (module.config.enabled) {
-                val newCues = observeTimeline(result)
-                requestTranslations(newCues, source = "timeline")
-                logObservedCueCount(newCues.size, source = "timeline")
+            val extractedCues = extractTimelineCues(result)
+            val plannedBlocks = coordinator.onTimelineBuilt(extractedCues)
+            if (plannedBlocks.isNotEmpty()) {
+                logObservedCueCount(extractedCues.size, source = "timeline(${plannedBlocks.size} blocks)")
             }
             result
         }
@@ -91,7 +102,7 @@ object CaptionHook : BaseHook {
             .map { it.toMethod() }
             .filter { method ->
                 View::class.java.isAssignableFrom(method.declaringClass) &&
-                        method.declaringClass.hasInstanceFieldAssignableTo(Editable::class.java)
+                    method.declaringClass.hasInstanceFieldAssignableTo(Editable::class.java)
             }
             .distinctBy { it.stableId() }
 
@@ -102,7 +113,7 @@ object CaptionHook : BaseHook {
                     return@hook chain.proceed()
                 }
 
-                if (!module.config.enabled) {
+                if (!coordinator.syncRuntimeState()) {
                     return@hook chain.proceed()
                 }
 
@@ -113,25 +124,37 @@ object CaptionHook : BaseHook {
 
                 val original = chain.getArg(0) as? CharSequence
                     ?: return@hook chain.proceed()
-                val normalizedOriginal = CaptionCue.normalize(original.toString())
-                rememberRendererState(thisObject, method, normalizedOriginal)
-
-                if (session.observeRenderedText(original)) {
-                    val length = normalizedOriginal.length
-                    logV(name, "Observed rendered caption text, length=$length")
+                val rawString = original.toString()
+                val normalizedOriginal = CaptionCue.normalize(rawString)
+                if (normalizedOriginal.isEmpty()) {
+                    return@hook chain.proceed()
                 }
 
-                session.translatedCueContaining(normalizedOriginal)?.let { translation ->
+                rememberRendererState(thisObject, method, rawString, normalizedOriginal)
+
+                if (session.observeRenderedText(original)) {
+                    logV(name, "Observed rendered caption text, length=${normalizedOriginal.length}")
+                }
+
+                val resolved = coordinator.resolveForRender(original)
+                    ?: return@hook chain.proceed()
+
+                val isMultiViewFragment = '\n' !in rawString &&
+                    '\r' !in rawString &&
+                    resolved.original != normalizedOriginal &&
+                    resolved.original.contains(normalizedOriginal)
+
+                if (isMultiViewFragment) {
                     val replacement = replacementForTranslatedCue(
-                        cueText = translation.original,
+                        cueText = resolved.original,
                         renderedFragment = normalizedOriginal,
-                        translated = translation.translated,
+                        translated = resolved.translated,
                     )
                     return@hook chain.proceed(arrayOf(replacement))
                 }
 
-                val formatted = formatCaption(original)
-                if (formatted === original || formatted.toString() == original.toString()) {
+                val formatted = BilingualFormatter.format(original, resolved.translated)
+                if (formatted === original || formatted.toString() == rawString) {
                     chain.proceed()
                 } else {
                     chain.proceed(arrayOf(formatted))
@@ -166,8 +189,7 @@ object CaptionHook : BaseHook {
         for (method in methods) {
             hook(method) { chain ->
                 observeCaptionTrack(chain.getArg(0), "${method.shortName()} arg0")
-                val result = chain.proceed()
-                result
+                chain.proceed()
             }
         }
 
@@ -180,17 +202,16 @@ object CaptionHook : BaseHook {
             .map { it.toMethod() }
             .filter { method ->
                 View::class.java.isAssignableFrom(method.declaringClass) &&
-                        method.declaringClass.hasInstanceFieldAssignableTo(SparseArray::class.java)
+                    method.declaringClass.hasInstanceFieldAssignableTo(SparseArray::class.java)
             }
             .distinctBy { it.stableId() }
 
         var installed = 0
         for (method in methods) {
             hook(method) { chain ->
-                if (module.config.enabled) {
-                    val newCues = observeCueList(chain.getArg(0))
-                    requestTranslations(newCues, source = "overlay")
-                    logObservedCueCount(newCues.size, source = "overlay")
+                val rawCues = extractOverlayCueList(chain.getArg(0))
+                if (rawCues.isNotEmpty()) {
+                    coordinator.onOverlayCues(rawCues)
                 }
                 chain.proceed()
             }
@@ -205,7 +226,7 @@ object CaptionHook : BaseHook {
         return installed > 0
     }
 
-    private fun observeTimeline(result: Any?): List<CaptionCue> {
+    private fun extractTimelineCues(result: Any?): List<CaptionCue> {
         if (result == null) return emptyList()
 
         val lists = result.instanceFieldValues()
@@ -235,15 +256,12 @@ object CaptionHook : BaseHook {
                 ),
             )
         }
-        return session.observeNewCues(cues)
+        return cues
     }
 
-    private fun observeCueList(arg: Any?): List<CaptionCue> {
+    private fun extractOverlayCueList(arg: Any?): List<CaptionCue> {
         val list = arg as? List<*> ?: return emptyList()
-        val cues = list.mapNotNull { item ->
-            item?.toCaptionCue()
-        }
-        return session.observeNewCues(cues)
+        return list.mapNotNull { item -> item?.toCaptionCue() }
     }
 
     private fun Any.toCaptionCue(): CaptionCue? {
@@ -314,52 +332,36 @@ object CaptionHook : BaseHook {
         return false
     }
 
-    private fun logObservedCueCount(newCueCount: Int, source: String) {
-        if (newCueCount <= 0) return
+    private fun logObservedCueCount(cueCount: Int, source: String) {
+        if (cueCount <= 0) return
 
         val total = session.observedCueCount()
-        if (total <= 5 || total % 25 == 0) {
-            logV(name, "Observed $newCueCount new caption cue(s) from $source, total=$total")
-        }
-    }
-
-    private fun requestTranslations(cues: List<CaptionCue>, source: String) {
-        for (cue in cues) {
-            requestTranslation(cue.text, source)
-        }
-    }
-
-    private fun requestTranslation(text: String, source: String) {
-        if (session.translationFor(text) != null) return
-
-        val sourceLanguage = CaptionLanguageState.currentSourceLanguage()
-        TranslationManager.translateAsync(
-            text = text,
-            context = "YouTube subtitle $source",
-            sourceLanguage = sourceLanguage,
-        ) { original, translated ->
-            session.putTranslation(original, translated)
-            logV(name, "Translated caption from $source, sourceLanguage=$sourceLanguage, length=${original.length}")
-            refreshVisibleRenderers(original, source)
+        if (total <= 5 || total % 25 == 0 || source.startsWith("timeline")) {
+            logV(name, "Observed $cueCount caption cue(s) from $source, total=$total")
         }
     }
 
     private fun observeCaptionTrack(track: Any?, source: String) {
-        if (!CaptionLanguageState.updateFromCaptionTrack(track, source)) return
+        if (!coordinator.onCaptionTrackObserved(track, source)) return
 
-        session.clear()
         synchronized(rendererStates) {
             rendererStates.clear()
         }
         rendererSequence.set(0L)
     }
 
-    private fun rememberRendererState(renderer: Any, method: Method, normalizedText: String) {
+    private fun rememberRendererState(
+        renderer: Any,
+        method: Method,
+        rawText: String,
+        normalizedText: String,
+    ) {
         if (normalizedText.isEmpty()) return
 
         synchronized(rendererStates) {
             rendererStates[renderer] = RendererState(
                 method = method,
+                rawText = rawText,
                 normalizedText = normalizedText,
                 sequence = rendererSequence.incrementAndGet(),
                 updatedAtMs = System.currentTimeMillis(),
@@ -377,7 +379,7 @@ object CaptionHook : BaseHook {
         if (normalizedCue.isEmpty() || normalizedFragment.isEmpty()) return renderedFragment
 
         val shouldDisplayBlock = normalizedCue == normalizedFragment ||
-                normalizedCue.endsWith(normalizedFragment)
+            normalizedCue.endsWith(normalizedFragment)
         return if (shouldDisplayBlock) {
             BilingualFormatter.format(normalizedCue, translated)
         } else {
@@ -385,40 +387,78 @@ object CaptionHook : BaseHook {
         }
     }
 
-    private fun refreshVisibleRenderers(original: String, source: String) {
-        val normalized = CaptionCue.normalize(original)
-        if (normalized.isEmpty()) return
-
+    private fun refreshVisibleRenderers(
+        updatedOriginals: Set<String>,
+        expectedEpoch: Long,
+        source: String,
+    ) {
         mainHandler.post {
+            if (!module.config.enabled || expectedEpoch != session.currentEpoch()) {
+                return@post
+            }
+
             val now = System.currentTimeMillis()
             val snapshot = synchronized(rendererStates) {
                 rendererStates.entries
                     .filter { (_, state) -> now - state.updatedAtMs <= RENDERER_STATE_TTL_MS }
                     .map { (renderer, state) -> renderer to state }
             }
+            if (snapshot.isEmpty()) return@post
 
-            val formatted = formatCaption(normalized)
-            if (formatted.toString() == normalized) return@post
-
-            val exactTargets = snapshot.filter { (_, state) -> state.normalizedText == normalized }
-            if (exactTargets.isNotEmpty()) {
-                for ((renderer, state) in exactTargets) {
-                    invokeRenderer(renderer, state.method, formatted, source, normalized.length)
+            // Full refresh (e.g. cache cleared or target language changed): re-evaluate or restore original text.
+            if (updatedOriginals.isEmpty()) {
+                for ((renderer, state) in snapshot) {
+                    val resolved = session.resolveTranslation(state.rawText)
+                    val display = if (resolved != null) {
+                        BilingualFormatter.format(state.rawText, resolved.translated)
+                    } else {
+                        state.rawText
+                    }
+                    invokeRenderer(renderer, state.method, display, source, state.normalizedText.length)
                 }
                 return@post
             }
 
-            val coveredTargets = snapshot
-                .filter { (_, state) -> state.normalizedText.isNotEmpty() && normalized.contains(state.normalizedText) }
-                .sortedBy { (_, state) -> state.sequence }
-            if (coveredTargets.isEmpty()) return@post
+            val handledRenderers = HashSet<Any>()
+            for ((renderer, state) in snapshot) {
+                val matchesExact = state.normalizedText in updatedOriginals
+                val matchesRollupLine = ('\n' in state.rawText || '\r' in state.rawText) &&
+                    CaptionCue.normalizeLines(state.rawText).any { it in updatedOriginals }
 
-            for ((renderer, state) in coveredTargets.dropLast(1)) {
-                invokeRenderer(renderer, state.method, "", source, normalized.length)
+                if (matchesExact || matchesRollupLine) {
+                    val resolved = session.resolveTranslation(state.rawText) ?: continue
+                    val formatted = BilingualFormatter.format(state.rawText, resolved.translated)
+                    if (formatted.toString() != state.rawText) {
+                        invokeRenderer(renderer, state.method, formatted, source, state.normalizedText.length)
+                        handledRenderers.add(renderer)
+                    }
+                }
             }
 
-            val anchor = coveredTargets.last()
-            invokeRenderer(anchor.first, anchor.second.method, formatted, source, normalized.length)
+            for (updatedCue in updatedOriginals) {
+                if (updatedCue.isEmpty()) continue
+                val coveredTargets = snapshot
+                    .filter { (renderer, state) ->
+                        renderer !in handledRenderers &&
+                            state.normalizedText.isNotEmpty() &&
+                            state.normalizedText != updatedCue &&
+                            updatedCue.contains(state.normalizedText)
+                    }
+                    .sortedBy { (_, state) -> state.sequence }
+                if (coveredTargets.isEmpty()) continue
+
+                val translated = session.translationFor(updatedCue) ?: continue
+                val formatted = BilingualFormatter.format(updatedCue, translated)
+                if (formatted.toString() == updatedCue) continue
+
+                for ((renderer, state) in coveredTargets.dropLast(1)) {
+                    invokeRenderer(renderer, state.method, "", source, updatedCue.length)
+                    handledRenderers.add(renderer)
+                }
+                val anchor = coveredTargets.last()
+                invokeRenderer(anchor.first, anchor.second.method, formatted, source, updatedCue.length)
+                handledRenderers.add(anchor.first)
+            }
         }
     }
 
@@ -461,9 +501,9 @@ object CaptionHook : BaseHook {
         val builderClass = addLineMethod?.declaredClass ?: return null
         val candidates = builderClass.methods.filter { method ->
             method.isMethod &&
-                    method.paramCount == 0 &&
-                    method.returnTypeName != "void" &&
-                    method.returnType?.hasAtLeastListFields(count = 3) == true
+                method.paramCount == 0 &&
+                method.returnTypeName != "void" &&
+                method.returnType?.hasAtLeastListFields(count = 3) == true
         }
 
         return candidates.singleOrNull() ?: candidates.firstOrNull()
@@ -490,8 +530,8 @@ object CaptionHook : BaseHook {
                 paramTypes("java.lang.CharSequence")
             }
         }.filter { method ->
-            method.declaredClass?.hasInstanceFieldTypeInHierarchy(EDITABLE_TYPE) == true
-            && !method.isConstructor
+            method.declaredClass?.hasInstanceFieldTypeInHierarchy(EDITABLE_TYPE) == true &&
+                !method.isConstructor
         }
 
     private fun DexKitBridge.findCaptionOverlayUpdateMethods(): List<MethodData> =
@@ -501,8 +541,8 @@ object CaptionHook : BaseHook {
                 paramTypes("java.util.List")
             }
         }.filter { method ->
-            method.declaredClass?.hasInstanceFieldTypeInHierarchy(SPARSE_ARRAY_TYPE) == true
-            && !method.isConstructor
+            method.declaredClass?.hasInstanceFieldTypeInHierarchy(SPARSE_ARRAY_TYPE) == true &&
+                !method.isConstructor
         }
 
     private fun DexKitBridge.findCaptionTrackClassName(): String? =
@@ -525,7 +565,7 @@ object CaptionHook : BaseHook {
             }
         }.filter { method ->
             method.isMethod &&
-                    !Modifier.isAbstract(method.modifiers)
+                !Modifier.isAbstract(method.modifiers)
         }
 
     private const val NON_DECREASING_SUBTITLE_TIME_ERROR =
@@ -534,10 +574,11 @@ object CaptionHook : BaseHook {
     private const val MENU_ITEM_CAPTIONS_KEY = "menu_item_captions"
     private const val EDITABLE_TYPE = "android.text.Editable"
     private const val SPARSE_ARRAY_TYPE = "android.util.SparseArray"
-    private const val RENDERER_STATE_TTL_MS = 2_000L
+    private const val RENDERER_STATE_TTL_MS = 2_500L
 
     private data class RendererState(
         val method: Method,
+        val rawText: String,
         val normalizedText: String,
         val sequence: Long,
         val updatedAtMs: Long,

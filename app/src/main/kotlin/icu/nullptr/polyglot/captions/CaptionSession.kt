@@ -372,6 +372,15 @@ class CaptionSession(
 
     fun allObservedCues(): List<CaptionCue> = currentSnapshot().cues
 
+    fun currentTimelineCues(): List<CaptionCue> = synchronized(stateLock) { timelineCues }
+
+    fun findNearestObservedCue(normalizedText: String): CaptionCue? {
+        if (normalizedText.isEmpty()) return null
+        val snap = currentSnapshot()
+        val idx = snap.nearestIndexForText(normalizedText, lastAnchorIndex) ?: return null
+        return snap.cues.getOrNull(idx)
+    }
+
     private fun lookupMultiLineTranslation(rawText: String): CaptionTranslation? {
         val lines = CaptionCue.normalizeLines(rawText)
         if (lines.size < 2) return null

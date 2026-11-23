@@ -7,6 +7,7 @@ import android.content.res.Resources
 import android.widget.Toast
 import icu.nullptr.polyglot.core.ConfigManager
 import icu.nullptr.polyglot.core.FileManager
+import icu.nullptr.polyglot.translate.TranslationManager
 import icu.nullptr.polyglot.util.DexKitRuntime
 import icu.nullptr.polyglot.util.findAndHookAfter
 import icu.nullptr.polyglot.util.findClass
@@ -34,6 +35,9 @@ private const val TARGET_PACKAGE = "com.google.android.youtube"
 private const val TAG = "ModuleEntry"
 
 class ModuleEntry : XposedModule() {
+    lateinit var hostContext: Context
+        private set
+
     lateinit var fileManager: FileManager
         private set
 
@@ -75,8 +79,10 @@ class ModuleEntry : XposedModule() {
             val application = chain.thisObject as Application
             val context = chain.getArg(0) as Context
 
+            hostContext = application
             fileManager = FileManager(context)
             config = ConfigManager(context, fileManager.configDir)
+            TranslationManager.bindHostRuntime(application, config)
 
             val amClass = findClass("android.content.res.AssetManager", javaClass.classLoader!!)
             val am = amClass.findConstructorExact().newInstance() as AssetManager

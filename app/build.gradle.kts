@@ -69,5 +69,5 @@ dependencies {
     implementation(libs.dexkit)
     implementation(libs.gson)
     implementation(libs.mmkv)
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.junit)
 }
