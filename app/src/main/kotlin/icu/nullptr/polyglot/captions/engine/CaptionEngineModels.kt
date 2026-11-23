@@ -23,6 +23,12 @@ enum class PublicationMode {
     STOPPED,
 }
 
+internal object MonotonicClock {
+    private val originNs: Long = System.nanoTime()
+
+    fun nowMs(): Long = (((System.nanoTime() - originNs) / 1_000_000L) + 1L).coerceAtLeast(1L)
+}
+
 data class IndexedCue(
     val cueIndex: Int,
     val startMs: Long,

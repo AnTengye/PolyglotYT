@@ -33,7 +33,7 @@ class DualQueueScheduler(
     private val translator: BlockTranslator,
     private val cacheLookup: BlockCacheLookup? = null,
     private val listener: TranslationPublishListener = object : TranslationPublishListener {},
-    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val clockMs: () -> Long = MonotonicClock::nowMs,
     val playbackTracker: PlaybackTracker = PlaybackTracker(clockMs),
     val prefetchRateLimiter: GcraRateLimiter = GcraRateLimiter(),
     private val maxRetriesPerBlock: Int = DEFAULT_MAX_RETRIES_PER_BLOCK,

@@ -17,7 +17,7 @@ data class PlaybackObservation(
  * detects backward/forward seeks, and gates prefetching during rapid scrub storms.
  */
 class PlaybackTracker(
-    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val clockMs: () -> Long = MonotonicClock::nowMs,
 ) {
     private var hasAnchor: Boolean = false
     private var anchorPosMs: Long = 0L
