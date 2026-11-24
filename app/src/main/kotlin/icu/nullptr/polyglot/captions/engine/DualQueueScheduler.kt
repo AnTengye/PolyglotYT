@@ -151,7 +151,7 @@ class DualQueueScheduler(
         synchronized(stateLock) {
             val cur = activeSession
             val replaceSession = cur.timelineCues.isNotEmpty() &&
-                !isPrefixExtension(cur.timelineCues, newIndexedCues)
+                !isTimelineContinuation(cur.timelineCues, newIndexedCues)
 
             val targetSession = if (replaceSession) {
                 cur.mode = PublicationMode.STOPPED
@@ -174,9 +174,16 @@ class DualQueueScheduler(
             }
 
             val existingBySignature = HashMap<String, BlockSlot>(targetSession.slots.size)
+            val preservedImmediateSlots = ArrayList<BlockSlot>()
             for (slot in targetSession.slots) {
                 if (!slot.block.isImmediate) {
                     existingBySignature[blockSignature(slot.block)] = slot
+                } else if (!replaceSession &&
+                    slot.state == BlockState.WAITING &&
+                    slot.accepted == null &&
+                    slot.activeAttempt == null
+                ) {
+                    preservedImmediateSlots += slot
                 }
             }
 
@@ -189,7 +196,11 @@ class DualQueueScheduler(
                         reused.activeAttempt != null -> reused
                     reused != null && reused.accepted != null ->
                         BlockSlot(block).also { preserved ->
-                            preserved.state = reused.state
+                            preserved.state = if (reused.state == BlockState.RUNNING) {
+                                BlockState.READY
+                            } else {
+                                reused.state
+                            }
                             preserved.accepted = reused.accepted
                             preserved.resolvedLocalTranslations.putAll(reused.resolvedLocalTranslations)
                             preserved.cacheChecked = true
@@ -202,6 +213,9 @@ class DualQueueScheduler(
                 targetSession.slots += slot
                 targetSession.recentHistoryCues.addAll(block.cues.takeLast(MAX_HISTORY_CUES))
                 trimHistoryLocked(targetSession)
+            }
+            for (immSlot in preservedImmediateSlots) {
+                targetSession.slots += immSlot
             }
             targetSession.timelineCues = newIndexedCues
             targetSession.nextGlobalCueIndex = (newIndexedCues.lastOrNull()?.cueIndex ?: -1) + 1
@@ -221,18 +235,21 @@ class DualQueueScheduler(
     fun submitImmediateCues(
         cues: List<CaptionCue>,
         maxCuesPerBlock: Int = SubtitleChunker.DEFAULT_IMMEDIATE_MAX_CUES,
+        updatePlaybackPosition: Boolean = true,
     ): List<PlannedBlock> {
         val collapsed = SubtitleChunker.collapseRollingCues(cues)
         if (collapsed.isEmpty()) return emptyList()
 
-        val firstValidStart = collapsed.firstOrNull { cue ->
-            isPlausibleImmediateStartMs(cue.startMs)
-        }
-        if (firstValidStart != null) {
-            onPlaybackPosition(
-                startMs = firstValidStart.startMs,
-                endMs = firstValidStart.endMs,
-            )
+        if (updatePlaybackPosition) {
+            val firstValidStart = collapsed.firstOrNull { cue ->
+                isPlausibleImmediateStartMs(cue.startMs)
+            }
+            if (firstValidStart != null) {
+                onPlaybackPosition(
+                    startMs = firstValidStart.startMs,
+                    endMs = firstValidStart.endMs,
+                )
+            }
         }
 
         val addedBlocks: List<PlannedBlock>
@@ -733,7 +750,7 @@ class DualQueueScheduler(
                 slot.activeAttempt = null
                 slot.provisional = emptyMap()
                 slot.state = if (slot.accepted != null) BlockState.READY else BlockState.WAITING
-                if (slot.state == BlockState.READY && s == activeSession && shouldMarkEverReadyLocked(s, attempt)) {
+                if (slot.state == BlockState.READY && s == activeSession && shouldMarkEverReadyLocked(s, slot, attempt)) {
                     s.everReady = true
                 }
             }
@@ -795,7 +812,7 @@ class DualQueueScheduler(
                     slot.activeAttempt = null
                 }
                 slot.state = BlockState.READY
-                if (shouldMarkEverReadyLocked(s, attempt)) {
+                if (shouldMarkEverReadyLocked(s, slot, attempt)) {
                     s.everReady = true
                 }
             }
@@ -949,10 +966,14 @@ class DualQueueScheduler(
     private fun isSessionActive(s: SessionState): Boolean =
         synchronized(stateLock) { s == activeSession && s.mode == PublicationMode.OPEN }
 
-    private fun shouldMarkEverReadyLocked(s: SessionState, attempt: BlockAttempt): Boolean {
+    private fun shouldMarkEverReadyLocked(
+        s: SessionState,
+        slot: BlockSlot,
+        attempt: BlockAttempt,
+    ): Boolean {
         if (s.everReady) return true
         val focusIdx = findLandingTimelineIndex(s.slots, playbackTracker.estimatePositionMs(clockMs()))
-        val attemptIsImmediate = s.slots.getOrNull(attempt.blockIndex)?.block?.isImmediate == true
+        val attemptIsImmediate = slot.block.isImmediate
         if (attempt.priority && (!attemptIsImmediate || focusIdx < 0)) return true
         if (focusIdx < 0) return false
         return s.slots[focusIdx].accepted != null
@@ -1032,13 +1053,16 @@ class DualQueueScheduler(
     private fun buildCandidateIndices(slots: List<BlockSlot>, focusIndex: Int): List<Int> {
         val timelineHint = if (focusIndex >= 0) (slots.size - focusIndex).coerceAtLeast(0) else 0
         val order = ArrayList<Int>(timelineHint + 4)
+        if (focusIndex >= 0 && !slots[focusIndex].block.isImmediate) {
+            order += focusIndex
+        }
         for (i in slots.indices) {
             if (slots[i].block.isImmediate && slots[i].state == BlockState.WAITING) {
                 order += i
             }
         }
         if (focusIndex >= 0) {
-            for (i in focusIndex until slots.size) {
+            for (i in (focusIndex + 1) until slots.size) {
                 if (!slots[i].block.isImmediate) {
                     order += i
                 }
@@ -1059,6 +1083,24 @@ class DualQueueScheduler(
                 startMs in minStart..maxEnd
             }
         }
+    }
+
+    private fun isTimelineContinuation(oldCues: List<IndexedCue>, newCues: List<IndexedCue>): Boolean {
+        if (oldCues.isEmpty() || newCues.isEmpty()) return false
+        if (isPrefixExtension(oldCues, newCues)) return true
+
+        // Live sliding window continuation: window shifts forward while preserving overlap with old tail.
+        val oldLast = oldCues.last()
+        if (newCues.first().startMs >= oldCues.first().startMs &&
+            newCues.last().startMs >= oldLast.startMs
+        ) {
+            val tailMatched = newCues.any { candidate ->
+                candidate.normalizedText == oldLast.normalizedText &&
+                    kotlin.math.abs(candidate.startMs - oldLast.startMs) <= 200L
+            }
+            if (tailMatched) return true
+        }
+        return false
     }
 
     private fun isPrefixExtension(oldCues: List<IndexedCue>, newCues: List<IndexedCue>): Boolean {

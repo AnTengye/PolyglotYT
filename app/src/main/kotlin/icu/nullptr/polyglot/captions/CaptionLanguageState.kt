@@ -216,7 +216,7 @@ object CaptionLanguageState {
                 if (eqIdx <= 0) return@mapNotNull null
                 val k = part.substring(0, eqIdx).trim().lowercase(Locale.ROOT)
                 val v = part.substring(eqIdx + 1).trim()
-                if (k.isEmpty()) null else k to v
+                if (k.isEmpty() || v.isEmpty()) null else k to v
             }
         if (pairs.isEmpty()) return base
 
@@ -263,7 +263,16 @@ object CaptionLanguageState {
             CharSequence::class.java.isAssignableFrom(type) ||
             type == java.net.URL::class.java ||
             type == java.net.URI::class.java ||
-            type.name == "android.net.Uri"
+            isAndroidUriClass(type)
+
+    private fun isAndroidUriClass(type: Class<*>): Boolean {
+        var cur: Class<*>? = type
+        while (cur != null && cur != Any::class.java) {
+            if (cur.name == "android.net.Uri") return true
+            cur = cur.superclass
+        }
+        return false
+    }
 
     private fun Field.getStringLikeOrNull(instance: Any): String? =
         runCatching {
@@ -274,7 +283,7 @@ object CaptionLanguageState {
                 is CharSequence -> raw.toString()
                 is java.net.URL -> raw.toExternalForm()
                 is java.net.URI -> raw.toString()
-                else -> if (raw.javaClass.name == "android.net.Uri" || type.name == "android.net.Uri") {
+                else -> if (isAndroidUriClass(raw.javaClass) || isAndroidUriClass(type)) {
                     raw.toString()
                 } else {
                     null

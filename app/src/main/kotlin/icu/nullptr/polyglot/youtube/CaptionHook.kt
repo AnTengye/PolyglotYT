@@ -273,14 +273,15 @@ object CaptionHook : BaseHook {
     }
 
     private fun Any.toCaptionCue(): CaptionCue? {
-        val text = instanceFieldValues()
+        val fields = instanceFieldValues()
+        val text = fields
             .filterIsInstance<CharSequence>()
             .map { CaptionCue.normalize(it.toString()) }
             .filter { it.isNotEmpty() }
             .maxByOrNull { it.length }
             ?: return null
 
-        val rawStartMs = firstInstanceFieldValue<Long>() ?: CaptionCue.UNKNOWN_TIME_MS
+        val rawStartMs = fields.firstNotNullOfOrNull { it as? Long } ?: CaptionCue.UNKNOWN_TIME_MS
         val validStartMs = if (rawStartMs in 0L..MAX_OVERLAY_START_MS) {
             rawStartMs
         } else {
@@ -292,7 +293,7 @@ object CaptionHook : BaseHook {
             startMs = validStartMs,
             endMs = CaptionCue.UNKNOWN_TIME_MS,
             text = text,
-            windowId = firstInstanceFieldValue<Int>() ?: CaptionCue.UNKNOWN_WINDOW_ID,
+            windowId = fields.firstNotNullOfOrNull { it as? Int } ?: CaptionCue.UNKNOWN_WINDOW_ID,
         )
     }
 
@@ -311,9 +312,6 @@ object CaptionHook : BaseHook {
             second to first
         }
     }
-
-    private inline fun <reified T> Any.firstInstanceFieldValue(): T? =
-        instanceFieldValues().firstNotNullOfOrNull { it as? T }
 
     private fun Any.instanceFieldValues(): List<Any?> {
         val values = ArrayList<Any?>()

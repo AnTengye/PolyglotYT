@@ -250,7 +250,10 @@ object OpenAICompatibleTranslator : Translator {
                 EndpointCapabilities.clearAuthFailure(endpoint, model, apiKey)
                 EndpointCapabilities.recordStreamSuccess(endpoint, model)
                 return cleaned.text.ifBlank { "OK ($model)" }
-            } catch (e: OpenAIRequestException) {
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (rawErr: Throwable) {
+                val e = OpenAIErrorClassifier.classifyTransportError(rawErr)
                 if (e.category == OpenAIErrorCategory.FATAL_AUTH_BILLING) {
                     EndpointCapabilities.recordAuthFailure(endpoint, model, apiKey)
                     throw e

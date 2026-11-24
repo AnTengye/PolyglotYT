@@ -486,6 +486,30 @@ class OpenAICompatibleTranslatorTest {
         }
     }
 
+    @Test
+    fun `probeConnectivityWithConfig classifies deterministic cleartext error cleanly`() {
+        val originalFactory = OpenAICompatibleTranslator.connectionFactory
+        try {
+            OpenAICompatibleTranslator.connectionFactory = {
+                throw java.io.IOException("Cleartext HTTP traffic to 127.0.0.1 not permitted")
+            }
+            val cfg = OpenAICompatibleTranslator.ClientConfig(
+                endpoint = "http://127.0.0.1:20128/v1",
+                apiKey = "sk-probe-cleartext",
+                model = "ali-tp/qwen3.8-flash",
+            )
+            try {
+                OpenAICompatibleTranslator.probeConnectivityWithConfig(5_000, cfg)
+                fail("Expected OpenAIRequestException")
+            } catch (e: OpenAIRequestException) {
+                assertEquals(OpenAIErrorCategory.FATAL_NETWORK_CONFIG, e.category)
+                assertTrue(e.message!!.contains("cleartext", ignoreCase = true))
+            }
+        } finally {
+            OpenAICompatibleTranslator.connectionFactory = originalFactory
+        }
+    }
+
     private fun respondJson(
         exchange: HttpExchange,
         status: Int,

@@ -199,4 +199,23 @@ class CaptionLanguageStateTest {
             CaptionLanguageState.updateFromCaptionTrack(trackNextVideo, "next-video"),
         )
     }
+
+    @Test
+    fun emptyTimedtextQueryParamsLikeTlangAndName_canonicalizeEquivalently() {
+        val baseTrack = KindOnlyTrack(
+            kind = "asr",
+            lang = "en",
+            url = "https://www.youtube.com/api/timedtext?v=vid_EMPTY&lang=en&kind=asr&expire=100",
+        )
+        val withEmptyParams = KindOnlyTrack(
+            kind = "asr",
+            lang = "en",
+            url = "https://www.youtube.com/api/timedtext?v=vid_EMPTY&lang=en&kind=asr&name=&tlang=&expire=200",
+        )
+        assertTrue(CaptionLanguageState.updateFromCaptionTrack(baseTrack, "base"))
+        assertFalse(
+            "Empty tlang=/name= query params must not cause a false track reset",
+            CaptionLanguageState.updateFromCaptionTrack(withEmptyParams, "empty-params"),
+        )
+    }
 }

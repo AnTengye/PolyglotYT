@@ -315,4 +315,82 @@ class CaptionSessionTest {
         assertEquals(8, session.currentTimelineCues().size)
         assertEquals("[音乐]", session.translationFor("[Music]"))
     }
+
+    @Test
+    fun genuineVideoSwitchFromLongToShorterOrMidStartVideo_stillReplacesTrack() {
+        val session = CaptionSession(configSignatureProvider = { "openai|zh-Hans|u|m" })
+
+        // Video A: 60 cues (0..180s)
+        val longVideo = (0 until 60).map { i ->
+            CaptionCue(startMs = i * 3_000L, endMs = (i + 1) * 3_000L, text = "Long video sentence $i.")
+        }
+        val obsLong = session.observeTimelineCues(longVideo)
+        session.putFinalTranslation("Long video sentence 0.", "长视频第0句。", obsLong.epoch)
+
+        // Switch to Video B: 15 cues (0..45s) — must replace track, NOT be misclassified as secondary window!
+        val mediumVideo = (0 until 15).map { i ->
+            CaptionCue(startMs = i * 3_000L, endMs = (i + 1) * 3_000L, text = "Medium video line $i.")
+        }
+        val obsMedium = session.observeTimelineCues(mediumVideo)
+        assertTrue("Switching from 60-cue video to 15-cue video must replace track", obsMedium.replacedTrack)
+        assertFalse(obsMedium.isSecondaryWindow)
+        assertNull(session.translationFor("Long video sentence 0."))
+
+        // Switch to Video C: 12 cues starting at 6s (after 6s intro music) — must replace track!
+        val midStartVideo = (0 until 12).map { i ->
+            CaptionCue(startMs = 6_000L + i * 3_000L, endMs = 9_000L + i * 3_000L, text = "Intro-delayed video $i.")
+        }
+        val obsMidStart = session.observeTimelineCues(midStartVideo)
+        assertTrue("Switching to a video starting at 6s must replace track", obsMidStart.replacedTrack)
+        assertFalse(obsMidStart.isSecondaryWindow)
+    }
+
+    @Test
+    fun forwardSegmentContinuation_rejectsBackwardTimestampInversion() {
+        val session = CaptionSession(configSignatureProvider = { "openai|zh-Hans|u|m" })
+        val seg1 = listOf(
+            CaptionCue(startMs = 0L, endMs = 5_000L, text = "Seg1 line 0."),
+            CaptionCue(startMs = 11_000L, endMs = 11_200L, text = "Seg1 line 1."),
+        )
+        session.observeTimelineCues(seg1)
+
+        // Incoming starts BEFORE seg1.last().startMs (10_800 < 11_000) -> must NOT append out-of-order!
+        val inverted = listOf(
+            CaptionCue(startMs = 10_800L, endMs = 13_000L, text = "Inverted line 0."),
+            CaptionCue(startMs = 13_000L, endMs = 16_000L, text = "Inverted line 1."),
+        )
+        val obs = session.observeTimelineCues(inverted)
+        assertTrue("Backward-overlapping unrelated segment must replace instead of inverting order", obs.replacedTrack)
+    }
+
+    @Test
+    fun annotationSecondaryWindowBeyondCurrentDashSegment_doesNotCorruptSubsequentForwardDashSegments() {
+        val session = CaptionSession(configSignatureProvider = { "openai|zh-Hans|u|m" })
+        val seg1 = (0 until 6).map { i ->
+            CaptionCue(startMs = i * 3_000L, endMs = (i + 1) * 3_000L, text = "DASH seg1 line $i.")
+        }
+        val obs1 = session.observeTimelineCues(seg1)
+        session.putFinalTranslation("DASH seg1 line 0.", "第一段第0句。", obs1.epoch)
+
+        // Secondary [Music] window arrives with timestamp 45s (beyond seg1's 18s end!) ->
+        // MUST be treated as secondary window, NOT appended as forward continuation!
+        val secObs = session.observeTimelineCues(
+            listOf(CaptionCue(startMs = 45_000L, endMs = 48_000L, text = "[Music]")),
+        )
+        assertFalse(secObs.replacedTrack)
+        assertTrue("Future [Music] must be classified as secondary window", secObs.isSecondaryWindow)
+        assertEquals(6, session.currentTimelineCues().size)
+
+        // Subsequent DASH segment 2 (18s..24s) MUST still merge forward cleanly without wiping seg1!
+        val seg2 = listOf(
+            CaptionCue(startMs = 18_000L, endMs = 21_000L, text = "DASH seg2 line 6."),
+            CaptionCue(startMs = 21_000L, endMs = 24_000L, text = "DASH seg2 line 7."),
+        )
+        val obs2 = session.observeTimelineCues(seg2)
+        assertFalse("DASH seg2 must merge forward without wiping seg1", obs2.replacedTrack)
+        assertFalse(obs2.isSecondaryWindow)
+        assertEquals(obs1.epoch, obs2.epoch)
+        assertEquals(8, session.currentTimelineCues().size)
+        assertEquals("第一段第0句。", session.translationFor("DASH seg1 line 0."))
+    }
 }

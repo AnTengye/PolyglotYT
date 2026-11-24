@@ -328,6 +328,18 @@ class CaptionSession(
                 )
             }
 
+            if (isAnnotationSecondaryWindow(previous, incoming)) {
+                val newCues = insertCuesLocked(incoming)
+                return TimelineObservation(
+                    epoch = epoch.get(),
+                    replacedTrack = false,
+                    allCues = previous,
+                    newCues = newCues,
+                    timelineSignature = lastTimelineSignature.orEmpty(),
+                    isSecondaryWindow = true,
+                )
+            }
+
             if (isForwardSegmentContinuation(previous, incoming)) {
                 val merged = mergeForwardSegment(previous, incoming)
                 val mergedSignature = computeTimelineSignature(merged)
@@ -677,6 +689,7 @@ class CaptionSession(
         }
         val prevEndMs = maxOf(prevLast.startMs, prevLast.endMs)
         return incFirstStart > prevFirstStart &&
+            incFirstStart >= prevLast.startMs &&
             incLastStart > prevLast.startMs &&
             incFirstStart >= prevEndMs - FORWARD_SEGMENT_OVERLAP_TOLERANCE_MS
     }
@@ -701,6 +714,22 @@ class CaptionSession(
         }
     }
 
+    private fun isAnnotationSecondaryWindow(
+        previous: List<CaptionCue>,
+        incoming: List<CaptionCue>,
+    ): Boolean {
+        if (previous.size < 2 || incoming.isEmpty()) return false
+        if (incoming.size >= previous.size && incoming.size > 3) return false
+        if (previous.all { isAnnotationCue(it.normalizedText()) }) return false
+        if (!incoming.all { isAnnotationCue(it.normalizedText()) }) return false
+        val prevStart = previous.first().startMs
+        val incStart = incoming.first().startMs
+        if (prevStart >= 0L && incStart >= 0L && incStart < prevStart - SECONDARY_WINDOW_TAIL_TOLERANCE_MS) {
+            return false
+        }
+        return true
+    }
+
     private fun isSecondaryWindow(
         previous: List<CaptionCue>,
         incoming: List<CaptionCue>,
@@ -719,11 +748,13 @@ class CaptionSession(
         if (incoming.all { isAnnotationCue(it.normalizedText()) }) {
             return true
         }
-        if (previous.size < 4) return false
+        if (previous.size < 4 || incoming.size > MAX_NON_ANNOTATION_SECONDARY_CUES) {
+            return false
+        }
 
-        val isSparseWindow = incoming.size * 3 <= previous.size
-        val startsMidPrimary = incStart >= prevStart + SECONDARY_WINDOW_MID_START_MS
-        return isSparseWindow || startsMidPrimary
+        val isSparseWindow = incoming.size * 4 <= previous.size
+        if (!isSparseWindow) return false
+        return incoming.size <= 3 || incStart >= prevStart + SECONDARY_WINDOW_MID_START_MS
     }
 
     private fun isPrimaryPromotingSecondary(
@@ -859,6 +890,7 @@ class CaptionSession(
         private const val FORWARD_SEGMENT_OVERLAP_TOLERANCE_MS = 500L
         private const val SECONDARY_WINDOW_TAIL_TOLERANCE_MS = 15_000L
         private const val SECONDARY_WINDOW_MID_START_MS = 5_000L
+        private const val MAX_NON_ANNOTATION_SECONDARY_CUES = 8
 
         private fun defaultConfigSignature(): String =
             moduleOrNull()?.config?.translationConfigSignature().orEmpty()
