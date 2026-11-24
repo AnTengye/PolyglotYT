@@ -111,4 +111,64 @@ class OpenAIEndpointAndErrorTest {
         )
         assertTrue(ParamAdaptation.DROP_STOP in stopSent.adaptations)
     }
+
+    @Test
+    fun `OpenAIErrorClassifier separates deterministic network config errors from transient socket errors`() {
+        val cleartext = OpenAIErrorClassifier.classifyTransportError(
+            java.io.IOException("Cleartext HTTP traffic to 127.0.0.1 not permitted"),
+        )
+        assertEquals(OpenAIErrorCategory.FATAL_NETWORK_CONFIG, cleartext.category)
+        assertFalse(cleartext.isDnsResolutionError)
+        assertTrue(cleartext.message!!.contains("cleartext", ignoreCase = true))
+        assertEquals(
+            icu.nullptr.polyglot.captions.engine.FailureKind.FATAL_CONFIG,
+            icu.nullptr.polyglot.translate.TranslationManager.mapOpenAiException(cleartext).kind,
+        )
+
+        val malformed = OpenAIErrorClassifier.classifyTransportError(
+            java.net.MalformedURLException("no protocol: localhost:20128"),
+        )
+        assertEquals(OpenAIErrorCategory.FATAL_NETWORK_CONFIG, malformed.category)
+        assertEquals(
+            icu.nullptr.polyglot.captions.engine.FailureKind.FATAL_CONFIG,
+            icu.nullptr.polyglot.translate.TranslationManager.mapOpenAiException(malformed).kind,
+        )
+
+        val invalidPort = OpenAIErrorClassifier.classifyTransportError(
+            IllegalArgumentException("port out of range:99999"),
+        )
+        assertEquals(OpenAIErrorCategory.FATAL_NETWORK_CONFIG, invalidPort.category)
+        assertEquals(
+            icu.nullptr.polyglot.captions.engine.FailureKind.FATAL_CONFIG,
+            icu.nullptr.polyglot.translate.TranslationManager.mapOpenAiException(invalidPort).kind,
+        )
+
+        val sslErr = OpenAIErrorClassifier.classifyTransportError(
+            javax.net.ssl.SSLHandshakeException("Chain validation failed"),
+        )
+        assertEquals(OpenAIErrorCategory.FATAL_NETWORK_CONFIG, sslErr.category)
+        assertEquals(
+            icu.nullptr.polyglot.captions.engine.FailureKind.FATAL_CONFIG,
+            icu.nullptr.polyglot.translate.TranslationManager.mapOpenAiException(sslErr).kind,
+        )
+
+        val dnsErr = OpenAIErrorClassifier.classifyTransportError(
+            java.net.UnknownHostException("Unable to resolve host \"bad.invalid\""),
+        )
+        assertEquals(OpenAIErrorCategory.FATAL_NETWORK_CONFIG, dnsErr.category)
+        assertTrue(dnsErr.isDnsResolutionError)
+        assertEquals(
+            icu.nullptr.polyglot.captions.engine.FailureKind.TRANSIENT,
+            icu.nullptr.polyglot.translate.TranslationManager.mapOpenAiException(dnsErr).kind,
+        )
+
+        val timeoutErr = OpenAIErrorClassifier.classifyTransportError(
+            java.net.SocketTimeoutException("Read timed out"),
+        )
+        assertEquals(OpenAIErrorCategory.SERVER_5XX_OR_STALE_SOCKET, timeoutErr.category)
+        assertEquals(
+            icu.nullptr.polyglot.captions.engine.FailureKind.TRANSIENT,
+            icu.nullptr.polyglot.translate.TranslationManager.mapOpenAiException(timeoutErr).kind,
+        )
+    }
 }

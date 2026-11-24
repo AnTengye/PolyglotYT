@@ -81,19 +81,23 @@ class ConfigManager(context: Context, directory: File) {
         fallbackCacheDir.mkdirs()
     }
 
-    private fun computeTranslationSignature(): String {
-        val credentialsAndPromptDigest = CacheKeyBuilder.sha256Hex(
-            buildString {
-                append(openAiApiKey.trim()).append('\n')
-                append(openAiSystemPrompt.trim()).append('\n')
-                append(openAiUserPrompt.trim()).append('\n')
-                append(microsoftEndpoint.trim()).append('\n')
-                append(microsoftApiKey.trim()).append('\n')
-                append(microsoftRegion.trim())
-            },
-        ).take(16)
-        return "$provider|$targetLanguage|${openAiEndpoint.trim()}|${openAiModel.trim()}|$credentialsAndPromptDigest"
-    }
+    private fun computeTranslationSignature(): String =
+        buildTranslationSignature(
+            provider = provider,
+            targetLanguage = targetLanguage,
+            openAiEndpoint = openAiEndpoint,
+            openAiModel = openAiModel,
+            openAiStreaming = openAiStreaming,
+            persistentCacheEnabled = persistentCacheEnabled,
+            requestTimeoutMs = requestTimeoutMs,
+            maxRetries = maxRetries,
+            openAiApiKey = openAiApiKey,
+            openAiSystemPrompt = openAiSystemPrompt,
+            openAiUserPrompt = openAiUserPrompt,
+            microsoftEndpoint = microsoftEndpoint,
+            microsoftApiKey = microsoftApiKey,
+            microsoftRegion = microsoftRegion,
+        )
 
     private inner class Pref<T>(
         private val key: String,
@@ -140,5 +144,36 @@ class ConfigManager(context: Context, directory: File) {
         const val SUBTITLE_ORIGINAL_FIRST = "original_first"
         const val SUBTITLE_TRANSLATION_FIRST = "translation_first"
         const val SUBTITLE_TRANSLATION_ONLY = "translation_only"
+
+        internal fun buildTranslationSignature(
+            provider: String,
+            targetLanguage: String,
+            openAiEndpoint: String,
+            openAiModel: String,
+            openAiStreaming: Boolean,
+            persistentCacheEnabled: Boolean,
+            requestTimeoutMs: Int,
+            maxRetries: Int,
+            openAiApiKey: String,
+            openAiSystemPrompt: String,
+            openAiUserPrompt: String,
+            microsoftEndpoint: String,
+            microsoftApiKey: String,
+            microsoftRegion: String,
+        ): String {
+            val credentialsAndPromptDigest = CacheKeyBuilder.sha256Hex(
+                buildString {
+                    append(openAiApiKey.trim()).append('\n')
+                    append(openAiSystemPrompt.trim()).append('\n')
+                    append(openAiUserPrompt.trim()).append('\n')
+                    append(microsoftEndpoint.trim()).append('\n')
+                    append(microsoftApiKey.trim()).append('\n')
+                    append(microsoftRegion.trim())
+                },
+            ).take(16)
+            return "$provider|$targetLanguage|${openAiEndpoint.trim()}|${openAiModel.trim()}|" +
+                "stream=$openAiStreaming|cache=$persistentCacheEnabled|" +
+                "timeout=$requestTimeoutMs|retries=$maxRetries|$credentialsAndPromptDigest"
+        }
     }
 }

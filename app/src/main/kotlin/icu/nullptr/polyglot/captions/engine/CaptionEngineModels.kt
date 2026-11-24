@@ -80,6 +80,9 @@ data class BlockTranslationPlan(
 )
 
 interface EngineRequestControl {
+    val sessionEpoch: Long
+        get() = 0L
+
     fun tryBeginAttempt(): Boolean
     fun isCancelled(): Boolean
     fun onConnection(connection: HttpURLConnection?)
@@ -106,6 +109,8 @@ fun interface BlockTranslator {
 
 fun interface BlockCacheLookup {
     fun lookup(block: PlannedBlock): Map<Int, String>?
+
+    fun lookup(sessionEpoch: Long, block: PlannedBlock): Map<Int, String>? = lookup(block)
 }
 
 interface TranslationPublishListener {

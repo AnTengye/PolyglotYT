@@ -547,6 +547,8 @@ object TranslationManager {
     internal fun mapOpenAiException(e: OpenAIRequestException): BlockTranslationException {
         val kind = when (e.category) {
             OpenAIErrorCategory.FATAL_AUTH_BILLING -> FailureKind.FATAL_CONFIG
+            OpenAIErrorCategory.FATAL_NETWORK_CONFIG ->
+                if (e.isDnsResolutionError) FailureKind.TRANSIENT else FailureKind.FATAL_CONFIG
             OpenAIErrorCategory.RATE_LIMIT_OVERLOAD -> FailureKind.RATE_LIMIT
             OpenAIErrorCategory.INVALID_RESULT -> FailureKind.INVALID_RESULT
             OpenAIErrorCategory.PARAM_OR_MODEL_REJECT ->

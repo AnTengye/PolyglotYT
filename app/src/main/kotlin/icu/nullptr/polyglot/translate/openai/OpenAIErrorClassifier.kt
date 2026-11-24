@@ -4,12 +4,21 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.io.EOFException
 import java.io.IOException
+import java.net.MalformedURLException
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.net.URISyntaxException
+import java.net.UnknownHostException
+import java.net.UnknownServiceException
+import java.security.cert.CertPathValidatorException
 import java.util.Locale
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
+import javax.net.ssl.SSLProtocolException
 
 enum class OpenAIErrorCategory {
     FATAL_AUTH_BILLING,
+    FATAL_NETWORK_CONFIG,
     PARAM_OR_MODEL_REJECT,
     RATE_LIMIT_OVERLOAD,
     SERVER_5XX_OR_STALE_SOCKET,
@@ -32,6 +41,7 @@ class OpenAIRequestException(
     val retryAfterExceededCap: Boolean = false,
     val isThinkingOnly: Boolean = false,
     val isModelUnavailable: Boolean = false,
+    val isDnsResolutionError: Boolean = false,
     val adaptations: Set<ParamAdaptation> = emptySet(),
     message: String,
     cause: Throwable? = null,
@@ -168,6 +178,63 @@ object OpenAIErrorClassifier {
 
     fun classifyTransportError(error: Throwable): OpenAIRequestException {
         if (error is OpenAIRequestException) return error
+
+        val chain = buildCauseChain(error)
+        val combinedLower = chain
+            .mapNotNull { it.message }
+            .joinToString("\n")
+            .lowercase(Locale.ROOT)
+        val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+
+        // 1. Android Network Security Policy blocking cleartext HTTP (deterministic config error).
+        if (containsCleartextBlockedSignal(combinedLower)) {
+            return OpenAIRequestException(
+                category = OpenAIErrorCategory.FATAL_NETWORK_CONFIG,
+                message = "OpenAI cleartext HTTP blocked by Android network security policy (use HTTPS endpoint): $detail",
+                cause = error,
+            )
+        }
+
+        // 2. Malformed URL, invalid port, or unsupported protocol/service (deterministic config error).
+        if (chain.any {
+                it is MalformedURLException ||
+                    it is URISyntaxException ||
+                    it is IllegalArgumentException ||
+                    it is UnknownServiceException
+            }
+        ) {
+            return OpenAIRequestException(
+                category = OpenAIErrorCategory.FATAL_NETWORK_CONFIG,
+                message = "OpenAI invalid endpoint URL or port configuration: $detail",
+                cause = error,
+            )
+        }
+
+        // 3. TLS / SSL certificate or handshake rejection (deterministic config/endpoint error).
+        if (chain.any {
+                it is SSLHandshakeException ||
+                    it is SSLPeerUnverifiedException ||
+                    it is SSLProtocolException ||
+                    it is CertPathValidatorException
+            }
+        ) {
+            return OpenAIRequestException(
+                category = OpenAIErrorCategory.FATAL_NETWORK_CONFIG,
+                message = "OpenAI TLS/SSL handshake failed: $detail",
+                cause = error,
+            )
+        }
+
+        // 4. DNS host resolution failure (skip inner retry amplification; mark DNS so scheduler can still recover on reconnect).
+        if (chain.any { it is UnknownHostException }) {
+            return OpenAIRequestException(
+                category = OpenAIErrorCategory.FATAL_NETWORK_CONFIG,
+                isDnsResolutionError = true,
+                message = "OpenAI host unreachable (DNS resolution failed): $detail",
+                cause = error,
+            )
+        }
+
         val category = when (error) {
             is EOFException,
             is SocketTimeoutException,
@@ -178,10 +245,25 @@ object OpenAIErrorClassifier {
         }
         return OpenAIRequestException(
             category = category,
-            message = "OpenAI network error: ${error.message ?: error.javaClass.simpleName}",
+            message = "OpenAI network error: $detail",
             cause = error,
         )
     }
+
+    private fun buildCauseChain(root: Throwable): List<Throwable> {
+        val out = ArrayList<Throwable>(4)
+        var current: Throwable? = root
+        while (current != null && out.size < 8 && current !in out) {
+            out += current
+            current = current.cause
+        }
+        return out
+    }
+
+    private fun containsCleartextBlockedSignal(lower: String): Boolean =
+        "cleartext http traffic" in lower ||
+            "cleartext communication" in lower ||
+            "not permitted by network security policy" in lower
 
     fun parseRetryAfter(headerValue: String?): Pair<Long?, Boolean> {
         val trimmed = headerValue?.trim().orEmpty()

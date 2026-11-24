@@ -127,10 +127,14 @@ object CaptionHook : BaseHook {
                 }
 
                 val original = chain.getArg(0) as? CharSequence
-                    ?: return@hook chain.proceed()
+                if (original == null) {
+                    forgetRendererState(thisObject)
+                    return@hook chain.proceed()
+                }
                 val rawString = original.toString()
                 val normalizedOriginal = CaptionCue.normalize(rawString)
                 if (normalizedOriginal.isEmpty()) {
+                    forgetRendererState(thisObject)
                     return@hook chain.proceed()
                 }
 
@@ -276,9 +280,16 @@ object CaptionHook : BaseHook {
             .maxByOrNull { it.length }
             ?: return null
 
+        val rawStartMs = firstInstanceFieldValue<Long>() ?: CaptionCue.UNKNOWN_TIME_MS
+        val validStartMs = if (rawStartMs in 0L..MAX_OVERLAY_START_MS) {
+            rawStartMs
+        } else {
+            CaptionCue.UNKNOWN_TIME_MS
+        }
+
         return CaptionCue(
             videoId = "",
-            startMs = firstInstanceFieldValue<Long>() ?: CaptionCue.UNKNOWN_TIME_MS,
+            startMs = validStartMs,
             endMs = CaptionCue.UNKNOWN_TIME_MS,
             text = text,
             windowId = firstInstanceFieldValue<Int>() ?: CaptionCue.UNKNOWN_WINDOW_ID,
@@ -352,6 +363,12 @@ object CaptionHook : BaseHook {
             rendererStates.clear()
         }
         rendererSequence.set(0L)
+    }
+
+    private fun forgetRendererState(renderer: Any) {
+        synchronized(rendererStates) {
+            rendererStates.remove(renderer)
+        }
     }
 
     private fun rememberRendererState(
@@ -588,8 +605,9 @@ object CaptionHook : BaseHook {
     private const val MENU_ITEM_CAPTIONS_KEY = "menu_item_captions"
     private const val EDITABLE_TYPE = "android.text.Editable"
     private const val SPARSE_ARRAY_TYPE = "android.util.SparseArray"
-    private const val RENDERER_STATE_TTL_MS = 2_500L
+    private const val RENDERER_STATE_TTL_MS = 12_000L
     private const val FULL_REFRESH_RENDERER_TTL_MS = 60_000L
+    private const val MAX_OVERLAY_START_MS = 48L * 60L * 60L * 1_000L
 
     private data class RendererState(
         val method: Method,

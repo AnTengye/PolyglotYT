@@ -385,6 +385,11 @@ object OpenAICompatibleTranslator : Translator {
                         throw classified
                     }
 
+                    OpenAIErrorCategory.FATAL_NETWORK_CONFIG -> {
+                        // Deterministic network/URL/TLS/cleartext policy failure: fail fast with 0 inner retries.
+                        throw classified
+                    }
+
                     OpenAIErrorCategory.PARAM_OR_MODEL_REJECT -> {
                         if (classified.isModelUnavailable) {
                             EndpointCapabilities.recordModelUnavailable(endpoint, model)

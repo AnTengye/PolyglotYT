@@ -447,6 +447,45 @@ class OpenAICompatibleTranslatorTest {
         }
     }
 
+    @Test
+    fun `cleartext policy and TLS handshake errors fail fast with zero inner retries and do not trip auth breaker`() {
+        val originalFactory = OpenAICompatibleTranslator.connectionFactory
+        val attempts = AtomicInteger(0)
+        try {
+            OpenAICompatibleTranslator.connectionFactory = {
+                attempts.incrementAndGet()
+                throw java.io.IOException("Cleartext HTTP traffic to 127.0.0.1 not permitted")
+            }
+            val cfg = OpenAICompatibleTranslator.ClientConfig(
+                endpoint = "http://127.0.0.1:20181/v1",
+                apiKey = "sk-cleartext",
+                model = "ali-tp/qwen3.8-flash",
+                maxRetries = 3,
+            )
+            try {
+                OpenAICompatibleTranslator.translateWithConfig(
+                    TranslationRequest(listOf("Hello"), "en", "zh-Hans", enableStreaming = true),
+                    cfg,
+                )
+                fail("Expected OpenAIRequestException")
+            } catch (e: OpenAIRequestException) {
+                assertEquals(OpenAIErrorCategory.FATAL_NETWORK_CONFIG, e.category)
+                assertEquals("Must fail fast with zero inner retries", 1, attempts.get())
+                assertTrue("Must not sleep before failing fast", recordedSleeps.isEmpty())
+                assertFalse(
+                    "Network config failure must not trip auth circuit breaker",
+                    EndpointCapabilities.isAuthTripped(
+                        OpenAIEndpointNormalizer.normalize(cfg.endpoint),
+                        cfg.model,
+                        cfg.apiKey,
+                    ),
+                )
+            }
+        } finally {
+            OpenAICompatibleTranslator.connectionFactory = originalFactory
+        }
+    }
+
     private fun respondJson(
         exchange: HttpExchange,
         status: Int,

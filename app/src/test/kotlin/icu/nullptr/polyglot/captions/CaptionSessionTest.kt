@@ -235,4 +235,84 @@ class CaptionSessionTest {
         assertEquals(1, obs2.newCues.size)
         assertEquals("Live cue C", obs2.newCues.single().normalizedText())
     }
+
+    @Test
+    fun reproA_secondaryWindowAndForwardDashSegment_preservePrimaryTimelineAndTranslations() {
+        val session = CaptionSession(configSignatureProvider = { "openai|zh-Hans|u|m" })
+        val primary = (0 until 10).map { i ->
+            CaptionCue(
+                startMs = i * 3_000L,
+                endMs = (i + 1) * 3_000L,
+                text = "Primary dialogue sentence $i.",
+            )
+        }
+        val obs1 = session.observeTimelineCues(primary)
+        assertFalse(obs1.replacedTrack)
+        assertFalse(obs1.isSecondaryWindow)
+        session.putFinalTranslation("Primary dialogue sentence 0.", "主对话第0句。", obs1.epoch)
+        session.putFinalTranslation("Primary dialogue sentence 5.", "主对话第5句。", obs1.epoch)
+
+        // 1) Secondary window ([Music], [Applause]) arrives mid-playback -> MUST NOT wipe primary timeline!
+        val secondaryMusic = listOf(
+            CaptionCue(startMs = 5_000L, endMs = 8_000L, text = "[Music]"),
+            CaptionCue(startMs = 20_000L, endMs = 23_000L, text = "[Applause]"),
+        )
+        val secObs = session.observeTimelineCues(secondaryMusic)
+        assertFalse("Secondary window must not replace primary track", secObs.replacedTrack)
+        assertTrue("Secondary window must be flagged as secondary", secObs.isSecondaryWindow)
+        assertEquals(obs1.epoch, secObs.epoch)
+        assertEquals(10, session.currentTimelineCues().size)
+        assertEquals("主对话第0句。", session.translationFor("Primary dialogue sentence 0."))
+        assertEquals(2, secObs.newCues.size)
+
+        // 2) Non-overlapping forward DASH segment (30s..42s) -> merges forward without wiping!
+        val dashSeg2 = (10 until 14).map { i ->
+            CaptionCue(
+                startMs = i * 3_000L,
+                endMs = (i + 1) * 3_000L,
+                text = "Primary dialogue sentence $i.",
+            )
+        }
+        val seg2Obs = session.observeTimelineCues(dashSeg2)
+        assertFalse("Forward DASH segment must not wipe session", seg2Obs.replacedTrack)
+        assertFalse(seg2Obs.isSecondaryWindow)
+        assertEquals(obs1.epoch, seg2Obs.epoch)
+        assertEquals(14, seg2Obs.allCues.size)
+        assertEquals(4, seg2Obs.newCues.size)
+        assertEquals("主对话第0句。", session.translationFor("Primary dialogue sentence 0."))
+        assertEquals("主对话第5句。", session.translationFor("Primary dialogue sentence 5."))
+
+        // 3) Genuine switch to a completely new 8-cue video starting at 0s -> MUST replace track!
+        val newVideo = (0 until 8).map { i ->
+            CaptionCue(
+                startMs = i * 3_000L,
+                endMs = (i + 1) * 3_000L,
+                text = "Brand new video line $i.",
+            )
+        }
+        val switchObs = session.observeTimelineCues(newVideo)
+        assertTrue("Genuine video switch must replace track", switchObs.replacedTrack)
+        assertTrue(switchObs.epoch > obs1.epoch)
+        assertNull(session.translationFor("Primary dialogue sentence 0."))
+    }
+
+    @Test
+    fun primaryTimelineArrivingAfterTinySecondaryWindow_promotesWithoutWiping() {
+        val session = CaptionSession(configSignatureProvider = { "openai|zh-Hans|u|m" })
+        val secondaryFirst = listOf(
+            CaptionCue(startMs = 5_000L, endMs = 8_000L, text = "[Music]"),
+        )
+        val obsSec = session.observeTimelineCues(secondaryFirst)
+        session.putFinalTranslation("[Music]", "[音乐]", obsSec.epoch)
+
+        val primarySecond = (0 until 8).map { i ->
+            CaptionCue(startMs = i * 3_000L, endMs = (i + 1) * 3_000L, text = "Main line $i.")
+        }
+        val obsMain = session.observeTimelineCues(primarySecond)
+        assertFalse(obsMain.replacedTrack)
+        assertFalse(obsMain.isSecondaryWindow)
+        assertEquals(obsSec.epoch, obsMain.epoch)
+        assertEquals(8, session.currentTimelineCues().size)
+        assertEquals("[音乐]", session.translationFor("[Music]"))
+    }
 }

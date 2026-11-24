@@ -328,6 +328,69 @@ class CaptionSession(
                 )
             }
 
+            if (isForwardSegmentContinuation(previous, incoming)) {
+                val merged = mergeForwardSegment(previous, incoming)
+                val mergedSignature = computeTimelineSignature(merged)
+                timelineCues = merged
+                lastTimelineSignature = mergedSignature
+                val newCues = insertCuesLocked(incoming)
+                return TimelineObservation(
+                    epoch = epoch.get(),
+                    replacedTrack = false,
+                    allCues = merged,
+                    newCues = newCues,
+                    timelineSignature = mergedSignature,
+                )
+            }
+
+            if (isSecondaryWindow(previous, incoming)) {
+                val newCues = insertCuesLocked(incoming)
+                return TimelineObservation(
+                    epoch = epoch.get(),
+                    replacedTrack = false,
+                    allCues = previous,
+                    newCues = newCues,
+                    timelineSignature = lastTimelineSignature.orEmpty(),
+                    isSecondaryWindow = true,
+                )
+            }
+
+            if (hasSameCueAnchorOverlap(previous, incoming)) {
+                val newCues = insertCuesLocked(incoming)
+                if (incoming.size >= previous.size) {
+                    timelineCues = incoming
+                    lastTimelineSignature = signature
+                    return TimelineObservation(
+                        epoch = epoch.get(),
+                        replacedTrack = false,
+                        allCues = incoming,
+                        newCues = newCues,
+                        timelineSignature = signature,
+                    )
+                }
+                return TimelineObservation(
+                    epoch = epoch.get(),
+                    replacedTrack = false,
+                    allCues = previous,
+                    newCues = newCues,
+                    timelineSignature = lastTimelineSignature.orEmpty(),
+                    isSecondaryWindow = true,
+                )
+            }
+
+            if (isPrimaryPromotingSecondary(previous, incoming)) {
+                timelineCues = incoming
+                lastTimelineSignature = signature
+                val newCues = insertCuesLocked(incoming)
+                return TimelineObservation(
+                    epoch = epoch.get(),
+                    replacedTrack = false,
+                    allCues = incoming,
+                    newCues = newCues,
+                    timelineSignature = signature,
+                )
+            }
+
             resetSessionStateLocked()
             timelineCues = incoming
             lastTimelineSignature = signature
@@ -381,6 +444,15 @@ class CaptionSession(
         val snap = currentSnapshot()
         val idx = snap.nearestIndexForText(normalizedText, lastAnchorIndex) ?: return null
         return snap.cues.getOrNull(idx)
+    }
+
+    fun hasObservedCueNearTime(
+        normalizedText: String,
+        targetStartMs: Long,
+        toleranceMs: Long = 10_000L,
+    ): Boolean {
+        if (normalizedText.isEmpty() || targetStartMs < 0L) return false
+        return currentSnapshot().hasOccurrenceNearTime(normalizedText, targetStartMs, toleranceMs)
     }
 
     fun isKnownStandaloneCue(text: String?): Boolean {
@@ -591,6 +663,107 @@ class CaptionSession(
         return false
     }
 
+    private fun isForwardSegmentContinuation(
+        previous: List<CaptionCue>,
+        incoming: List<CaptionCue>,
+    ): Boolean {
+        if (previous.isEmpty() || incoming.isEmpty()) return false
+        val prevFirstStart = previous.first().startMs
+        val prevLast = previous.last()
+        val incFirstStart = incoming.first().startMs
+        val incLastStart = incoming.last().startMs
+        if (prevFirstStart < 0L || prevLast.startMs < 0L || incFirstStart < 0L || incLastStart < 0L) {
+            return false
+        }
+        val prevEndMs = maxOf(prevLast.startMs, prevLast.endMs)
+        return incFirstStart > prevFirstStart &&
+            incLastStart > prevLast.startMs &&
+            incFirstStart >= prevEndMs - FORWARD_SEGMENT_OVERLAP_TOLERANCE_MS
+    }
+
+    private fun mergeForwardSegment(
+        previous: List<CaptionCue>,
+        incoming: List<CaptionCue>,
+    ): List<CaptionCue> {
+        val merged = ArrayList<CaptionCue>(previous.size + incoming.size)
+        merged.addAll(previous)
+        val seenKeys = previous.asSequence().map { it.cacheKey() }.toHashSet()
+        for (cue in incoming) {
+            if (seenKeys.add(cue.cacheKey())) {
+                merged.add(cue)
+            }
+        }
+        val cap = maxObservedCues.coerceAtLeast(MIN_OBSERVED_CUES_CAP)
+        return if (merged.size > cap) {
+            merged.subList(merged.size - cap, merged.size).toList()
+        } else {
+            merged
+        }
+    }
+
+    private fun isSecondaryWindow(
+        previous: List<CaptionCue>,
+        incoming: List<CaptionCue>,
+    ): Boolean {
+        if (previous.size < 2 || incoming.isEmpty() || incoming.size >= previous.size) return false
+        val prevStart = previous.first().startMs
+        val incStart = incoming.first().startMs
+        if (prevStart < 0L || incStart < 0L) return false
+        val prevEnd = previous.maxOf { maxOf(it.startMs, it.endMs) }
+        val incEnd = incoming.maxOf { maxOf(it.startMs, it.endMs) }
+        if (prevEnd < prevStart || incEnd < incStart) return false
+
+        val withinSpan = incStart >= prevStart && incEnd <= prevEnd + SECONDARY_WINDOW_TAIL_TOLERANCE_MS
+        if (!withinSpan) return false
+
+        if (incoming.all { isAnnotationCue(it.normalizedText()) }) {
+            return true
+        }
+        if (previous.size < 4) return false
+
+        val isSparseWindow = incoming.size * 3 <= previous.size
+        val startsMidPrimary = incStart >= prevStart + SECONDARY_WINDOW_MID_START_MS
+        return isSparseWindow || startsMidPrimary
+    }
+
+    private fun isPrimaryPromotingSecondary(
+        previous: List<CaptionCue>,
+        incoming: List<CaptionCue>,
+    ): Boolean {
+        if (previous.isEmpty() || previous.size > 3 || incoming.size < 4) return false
+        if (previous.size * 3 > incoming.size) return false
+        val prevStart = previous.first().startMs
+        val incStart = incoming.first().startMs
+        if (prevStart < 0L || incStart < 0L) return false
+        val prevEnd = previous.maxOf { maxOf(it.startMs, it.endMs) }
+        val incEnd = incoming.maxOf { maxOf(it.startMs, it.endMs) }
+        return prevStart >= incStart && prevEnd <= incEnd + SECONDARY_WINDOW_TAIL_TOLERANCE_MS
+    }
+
+    private fun hasSameCueAnchorOverlap(
+        previous: List<CaptionCue>,
+        incoming: List<CaptionCue>,
+    ): Boolean {
+        val prevAnchors = HashSet<String>(previous.size * 2)
+        for (cue in previous) {
+            if (cue.startMs >= 0L) {
+                prevAnchors.add("${cue.startMs}|${cue.normalizedText()}")
+            }
+        }
+        if (prevAnchors.isEmpty()) return false
+        return incoming.any { cue ->
+            cue.startMs >= 0L && "${cue.startMs}|${cue.normalizedText()}" in prevAnchors
+        }
+    }
+
+    private fun isAnnotationCue(normalizedText: String): Boolean {
+        if (normalizedText.isEmpty()) return false
+        return (normalizedText.startsWith("[") && normalizedText.endsWith("]")) ||
+            (normalizedText.startsWith("(") && normalizedText.endsWith(")")) ||
+            normalizedText.contains('♪') ||
+            normalizedText.contains('♫')
+    }
+
     private fun hasAnyOverlap(existing: Collection<CaptionCue>, incoming: List<CaptionCue>): Boolean {
         val incomingTexts = incoming.asSequence().map { it.normalizedText() }.toHashSet()
         return existing.any { it.normalizedText() in incomingTexts }
@@ -614,6 +787,21 @@ class CaptionSession(
     ) {
         fun hasExactCue(normalized: String): Boolean =
             positionsByNormalizedText.containsKey(normalized)
+
+        fun hasOccurrenceNearTime(
+            normalized: String,
+            targetStartMs: Long,
+            toleranceMs: Long,
+        ): Boolean {
+            val positions = positionsByNormalizedText[normalized] ?: return false
+            for (idx in positions) {
+                val startMs = cues[idx].startMs
+                if (startMs >= 0L && kotlin.math.abs(startMs - targetStartMs) <= toleranceMs) {
+                    return true
+                }
+            }
+            return false
+        }
 
         fun nearestIndexForText(normalized: String, currentAnchor: Int): Int? {
             val positions = positionsByNormalizedText[normalized] ?: return null
@@ -668,6 +856,9 @@ class CaptionSession(
         private const val LIVE_OVERLAY_BATCH_LIMIT = 8
         private const val MAX_RENDERED_TEXTS = 512
         private const val RENDERED_TEXT_LOG_INTERVAL_MS = 30_000L
+        private const val FORWARD_SEGMENT_OVERLAP_TOLERANCE_MS = 500L
+        private const val SECONDARY_WINDOW_TAIL_TOLERANCE_MS = 15_000L
+        private const val SECONDARY_WINDOW_MID_START_MS = 5_000L
 
         private fun defaultConfigSignature(): String =
             moduleOrNull()?.config?.translationConfigSignature().orEmpty()
@@ -684,5 +875,6 @@ class CaptionSession(
         val allCues: List<CaptionCue>,
         val newCues: List<CaptionCue>,
         val timelineSignature: String,
+        val isSecondaryWindow: Boolean = false,
     )
 }
